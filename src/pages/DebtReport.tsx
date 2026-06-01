@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Building2, ChevronDown, ChevronRight, Plus, Edit2, Trash2,
   Lock, Unlock, TrendingDown, DollarSign, Calendar, Percent,
-  X, Check, AlertTriangle, Search
+  X, Check, AlertTriangle, Search, TableProperties
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
@@ -242,16 +242,163 @@ function LoanModal({
   );
 }
 
+// ── Amortization Schedule ──────────────────────────────────────────────────
+
+interface AmortRow {
+  n: number;
+  date: string;
+  opening: number;
+  interest: number;
+  principal: number;
+  ending: number;
+}
+
+function buildSchedule(loan: DebtLoan): AmortRow[] {
+  const rows: AmortRow[] = [];
+  const monthlyRate = loan.interest_rate / 12;
+  let balance = loan.balance;
+  if (balance <= 0) return [];
+
+  // Determine starting month: day after origination or today if no origination
+  let cursor: Date;
+  if (loan.origination_date) {
+    const orig = new Date(loan.origination_date + 'T00:00:00');
+    cursor = new Date(orig.getFullYear(), orig.getMonth() + 1, orig.getDate());
+  } else {
+    const now = new Date();
+    cursor = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  }
+
+  // Seek forward to where balance matches current balance by finding how many
+  // payments have already been made (skip to today if cursor is in the past)
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  // If cursor is already in the past relative to today's approximate position, use next month
+  if (cursor < today) {
+    cursor = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+  }
+
+  let n = 1;
+  const maxPayments = 600; // safety cap
+  while (balance > 0.005 && n <= maxPayments) {
+    const interest = monthlyRate > 0 ? balance * monthlyRate : 0;
+    const payment = Math.min(loan.monthly_payment, balance + interest);
+    const principal = payment - interest;
+    const ending = Math.max(0, balance - principal);
+
+    const mo = cursor.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    rows.push({ n, date: mo, opening: balance, interest, principal, ending });
+
+    balance = ending;
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, cursor.getDate());
+    n++;
+  }
+  return rows;
+}
+
+function AmortModal({ loan, onClose }: { loan: DebtLoan; onClose: () => void }) {
+  const schedule = buildSchedule(loan);
+  const totalInterest = schedule.reduce((s, r) => s + r.interest, 0);
+  const totalPrincipal = schedule.reduce((s, r) => s + r.principal, 0);
+  const payoffDate = schedule.length > 0 ? schedule[schedule.length - 1].date : '—';
+
+  // Highlight row closest to today
+  const todayLabel = new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+  const todayIdx = schedule.findIndex(r => r.date === todayLabel);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.75)' }}>
+      <div className="w-full max-w-5xl rounded-2xl flex flex-col overflow-hidden" style={{ background: '#0F0E0C', border: '1px solid #2C2A27', maxHeight: '90vh' }}>
+        {/* Header */}
+        <div className="flex items-start justify-between px-6 py-4 flex-shrink-0" style={{ borderBottom: '1px solid #2C2A27' }}>
+          <div>
+            <h2 className="text-base font-semibold" style={{ color: '#F5F3EE' }}>
+              Amortization Schedule — {loan.lender}
+            </h2>
+            <p className="text-xs mt-0.5" style={{ color: '#6B6865' }}>
+              {loan.description}{loan.entity ? ` · ${loan.entity}` : ''} · {fmtRate(loan.interest_rate)} · {fmtFull(loan.monthly_payment)}/mo
+            </p>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg transition-colors hover:bg-white/5 flex-shrink-0 ml-4">
+            <X className="w-4 h-4" style={{ color: '#9A9690' }} />
+          </button>
+        </div>
+
+        {/* Summary strip */}
+        <div className="grid grid-cols-4 gap-px flex-shrink-0" style={{ background: '#2C2A27' }}>
+          {[
+            { label: 'Current Balance', value: fmtFull(loan.balance), color: '#F5F3EE' },
+            { label: 'Total Interest', value: fmt(totalInterest), color: '#F87171' },
+            { label: 'Total Principal', value: fmt(totalPrincipal), color: '#4ADE80' },
+            { label: 'Payoff Date', value: payoffDate, color: '#C8A96E' },
+          ].map(s => (
+            <div key={s.label} className="px-5 py-3" style={{ background: '#141210' }}>
+              <div className="text-xs mb-0.5" style={{ color: '#6B6865' }}>{s.label}</div>
+              <div className="text-sm font-semibold" style={{ color: s.color }}>{s.value}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Table */}
+        {schedule.length === 0 ? (
+          <div className="flex items-center justify-center py-16 text-sm" style={{ color: '#4A4844' }}>
+            No schedule available — balance is zero or no payment data.
+          </div>
+        ) : (
+          <div className="overflow-auto flex-1">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0" style={{ background: '#141210', borderBottom: '1px solid #2C2A27' }}>
+                <tr>
+                  {['#', 'Date', 'Opening Balance', 'Interest', 'Principal', 'Ending Balance'].map(h => (
+                    <th key={h} className="px-4 py-2.5 text-right first:text-left font-medium whitespace-nowrap" style={{ color: '#6B6865' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {schedule.map((row, i) => {
+                  const isToday = i === todayIdx;
+                  const isFinal = i === schedule.length - 1;
+                  return (
+                    <tr
+                      key={row.n}
+                      style={{
+                        borderBottom: '1px solid #1A1917',
+                        background: isToday ? 'rgba(200,169,110,0.07)' : isFinal ? 'rgba(74,222,128,0.05)' : 'transparent',
+                      }}
+                    >
+                      <td className="px-4 py-2 font-mono" style={{ color: isToday ? '#C8A96E' : '#4A4844' }}>{row.n}</td>
+                      <td className="px-4 py-2 whitespace-nowrap font-medium" style={{ color: isToday ? '#C8A96E' : isFinal ? '#4ADE80' : '#9A9690' }}>
+                        {row.date}
+                        {isToday && <span className="ml-2 text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(200,169,110,0.15)', color: '#C8A96E' }}>Today</span>}
+                        {isFinal && !isToday && <span className="ml-2 text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(74,222,128,0.12)', color: '#4ADE80' }}>Payoff</span>}
+                      </td>
+                      <td className="px-4 py-2 text-right font-mono" style={{ color: '#C8C4BC' }}>{fmtFull(row.opening)}</td>
+                      <td className="px-4 py-2 text-right font-mono" style={{ color: '#F87171' }}>{fmtFull(row.interest)}</td>
+                      <td className="px-4 py-2 text-right font-mono" style={{ color: '#4ADE80' }}>{fmtFull(row.principal)}</td>
+                      <td className="px-4 py-2 text-right font-mono font-semibold" style={{ color: row.ending <= 0 ? '#4ADE80' : '#F5F3EE' }}>{fmtFull(row.ending)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Lender Row ─────────────────────────────────────────────────────────────
 
 function LenderGroup({
-  group, canEdit, onEdit, onDelete, onAdd
+  group, canEdit, onEdit, onDelete, onAdd, onAmortize
 }: {
   group: LenderGroup;
   canEdit: boolean;
   onEdit: (loan: DebtLoan) => void;
   onDelete: (id: string) => void;
   onAdd: (lender: string) => void;
+  onAmortize: (loan: DebtLoan) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -350,16 +497,25 @@ function LenderGroup({
                       {loan.auto_pull && <div className="text-xs" style={{ color: '#4ADE80' }}>Auto Pull</div>}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
-                      {canEdit && (
-                        <div className="flex items-center gap-1.5">
-                          <button onClick={() => onEdit(loan)} className="p-1.5 rounded-lg transition-colors hover:bg-white/[0.06]">
-                            <Edit2 className="w-3.5 h-3.5" style={{ color: '#6B6865' }} />
-                          </button>
-                          <button onClick={() => onDelete(loan.id)} className="p-1.5 rounded-lg transition-colors hover:bg-red-500/10">
-                            <Trash2 className="w-3.5 h-3.5" style={{ color: '#6B6865' }} />
-                          </button>
-                        </div>
-                      )}
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => onAmortize(loan)}
+                          className="p-1.5 rounded-lg transition-colors hover:bg-white/[0.06]"
+                          title="Amortization schedule"
+                        >
+                          <TableProperties className="w-3.5 h-3.5" style={{ color: '#C8A96E' }} />
+                        </button>
+                        {canEdit && (
+                          <>
+                            <button onClick={() => onEdit(loan)} className="p-1.5 rounded-lg transition-colors hover:bg-white/[0.06]">
+                              <Edit2 className="w-3.5 h-3.5" style={{ color: '#6B6865' }} />
+                            </button>
+                            <button onClick={() => onDelete(loan.id)} className="p-1.5 rounded-lg transition-colors hover:bg-red-500/10">
+                              <Trash2 className="w-3.5 h-3.5" style={{ color: '#6B6865' }} />
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -402,6 +558,7 @@ export default function DebtReport({ tabId, uploaderName }: DebtReportProps) {
   const [form, setForm] = useState<EditForm>(blankEditForm());
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [amortLoan, setAmortLoan] = useState<DebtLoan | null>(null);
 
   const canEdit = uploaderName.trim() !== '' && !locked;
 
@@ -621,6 +778,7 @@ export default function DebtReport({ tabId, uploaderName }: DebtReportProps) {
                 onEdit={openEdit}
                 onDelete={handleDelete}
                 onAdd={openAdd}
+                onAmortize={setAmortLoan}
               />
             ))}
 
@@ -656,6 +814,11 @@ export default function DebtReport({ tabId, uploaderName }: DebtReportProps) {
         <div className="fixed inset-0 z-40 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.4)' }}>
           <div className="w-8 h-8 border-2 rounded-full animate-spin" style={{ borderColor: '#2C2A27', borderTopColor: '#C8A96E' }} />
         </div>
+      )}
+
+      {/* Amortization schedule modal */}
+      {amortLoan && (
+        <AmortModal loan={amortLoan} onClose={() => setAmortLoan(null)} />
       )}
     </div>
   );
