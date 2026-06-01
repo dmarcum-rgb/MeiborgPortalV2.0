@@ -1,0 +1,662 @@
+import { useState, useEffect, useCallback } from 'react';
+import {
+  Building2, ChevronDown, ChevronRight, Plus, Edit2, Trash2,
+  Lock, Unlock, TrendingDown, DollarSign, Calendar, Percent,
+  X, Check, AlertTriangle, Search
+} from 'lucide-react';
+import { supabase } from '../lib/supabase';
+
+// ── Types ──────────────────────────────────────────────────────────────────
+
+interface DebtLoan {
+  id: string;
+  tab_id: string;
+  lender: string;
+  loan_number: string;
+  description: string;
+  entity: string;
+  balance: number;
+  origination_date: string | null;
+  maturity_date: string | null;
+  term_months: number | null;
+  interest_rate: number;
+  monthly_payment: number;
+  beginning_balance: number;
+  loan_type: string;
+  unit_numbers: string;
+  auto_pull: boolean;
+  notes: string;
+  sort_order: number;
+}
+
+interface LenderGroup {
+  lender: string;
+  loans: DebtLoan[];
+  totalBalance: number;
+  totalMonthlyPayment: number;
+}
+
+interface EditForm {
+  lender: string;
+  loan_number: string;
+  description: string;
+  entity: string;
+  balance: string;
+  origination_date: string;
+  maturity_date: string;
+  term_months: string;
+  interest_rate: string;
+  monthly_payment: string;
+  beginning_balance: string;
+  loan_type: string;
+  unit_numbers: string;
+  auto_pull: boolean;
+  notes: string;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function fmt(n: number | null | undefined): string {
+  if (n == null || isNaN(n)) return '—';
+  if (n < 0) return `(${Math.abs(n).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0, maximumFractionDigits: 0 })})`;
+  return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0, maximumFractionDigits: 0 });
+}
+
+function fmtFull(n: number | null | undefined): string {
+  if (n == null || isNaN(n)) return '—';
+  return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
+}
+
+function fmtRate(r: number): string {
+  return (r * 100).toFixed(2) + '%';
+}
+
+function fmtDate(d: string | null | undefined): string {
+  if (!d) return '—';
+  const parts = d.split('T')[0].split('-');
+  if (parts.length < 3) return d;
+  return `${parts[1]}/${parts[2]}/${parts[0]}`;
+}
+
+function blankEditForm(tabId?: string, lender?: string): EditForm {
+  return {
+    lender: lender ?? '',
+    loan_number: '',
+    description: '',
+    entity: '',
+    balance: '',
+    origination_date: '',
+    maturity_date: '',
+    term_months: '',
+    interest_rate: '',
+    monthly_payment: '',
+    beginning_balance: '',
+    loan_type: 'Debt',
+    unit_numbers: '',
+    auto_pull: false,
+    notes: '',
+  };
+  void tabId;
+}
+
+function loanToForm(loan: DebtLoan): EditForm {
+  return {
+    lender: loan.lender,
+    loan_number: loan.loan_number,
+    description: loan.description,
+    entity: loan.entity,
+    balance: loan.balance === 0 ? '0' : String(loan.balance),
+    origination_date: loan.origination_date?.split('T')[0] ?? '',
+    maturity_date: loan.maturity_date?.split('T')[0] ?? '',
+    term_months: loan.term_months != null ? String(loan.term_months) : '',
+    interest_rate: (loan.interest_rate * 100).toFixed(4),
+    monthly_payment: String(loan.monthly_payment),
+    beginning_balance: String(loan.beginning_balance),
+    loan_type: loan.loan_type,
+    unit_numbers: loan.unit_numbers,
+    auto_pull: loan.auto_pull,
+    notes: loan.notes,
+  };
+}
+
+const ENTITIES = ['Bros', 'Enterprise', 'WHS', 'SAE', 'Logistics', 'MH1', 'MH2', 'MH3', 'MH5', ''];
+const LOAN_TYPES = ['Debt', 'Capital Lease', 'Lease'];
+
+// ── Loan Form Modal ────────────────────────────────────────────────────────
+
+function LoanModal({
+  form, setForm, onSave, onClose, title, saving
+}: {
+  form: EditForm;
+  setForm: (f: EditForm) => void;
+  onSave: () => void;
+  onClose: () => void;
+  title: string;
+  saving: boolean;
+}) {
+  function field(label: string, key: keyof EditForm, type = 'text', opts?: { placeholder?: string; options?: string[] }) {
+    const val = form[key];
+    if (opts?.options) {
+      return (
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-medium" style={{ color: '#9A9690' }}>{label}</label>
+          <select
+            value={String(val)}
+            onChange={e => setForm({ ...form, [key]: e.target.value })}
+            className="px-3 py-2 rounded-lg text-sm outline-none"
+            style={{ background: '#1A1917', border: '1px solid #2C2A27', color: '#F5F3EE' }}
+          >
+            {opts.options.map(o => <option key={o} value={o}>{o || '(none)'}</option>)}
+          </select>
+        </div>
+      );
+    }
+    if (type === 'checkbox') {
+      return (
+        <div className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            id={`field-${key}`}
+            checked={Boolean(val)}
+            onChange={e => setForm({ ...form, [key]: e.target.checked })}
+            className="w-4 h-4 rounded"
+            style={{ accentColor: '#C8A96E' }}
+          />
+          <label htmlFor={`field-${key}`} className="text-sm" style={{ color: '#C8C4BC' }}>{label}</label>
+        </div>
+      );
+    }
+    return (
+      <div className="flex flex-col gap-1">
+        <label className="text-xs font-medium" style={{ color: '#9A9690' }}>{label}</label>
+        <input
+          type={type}
+          value={String(val)}
+          onChange={e => setForm({ ...form, [key]: e.target.value })}
+          placeholder={opts?.placeholder}
+          className="px-3 py-2 rounded-lg text-sm outline-none"
+          style={{ background: '#1A1917', border: '1px solid #2C2A27', color: '#F5F3EE' }}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.7)' }}>
+      <div className="w-full max-w-2xl rounded-2xl overflow-hidden flex flex-col max-h-[90vh]" style={{ background: '#141210', border: '1px solid #2C2A27' }}>
+        <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: '1px solid #2C2A27' }}>
+          <h2 className="text-base font-semibold" style={{ color: '#F5F3EE' }}>{title}</h2>
+          <button onClick={onClose} className="p-1.5 rounded-lg transition-colors hover:bg-white/5">
+            <X className="w-4 h-4" style={{ color: '#9A9690' }} />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto p-6 flex flex-col gap-4">
+          <div className="grid grid-cols-2 gap-4">
+            {field('Lender', 'lender', 'text', { placeholder: 'e.g. BMO' })}
+            {field('Loan Number', 'loan_number', 'text', { placeholder: 'e.g. 05-2938-000-000-00' })}
+          </div>
+          {field('Description', 'description', 'text', { placeholder: 'e.g. 25 Trailers' })}
+          <div className="grid grid-cols-2 gap-4">
+            {field('Entity', 'entity', 'text', { options: ENTITIES })}
+            {field('Loan Type', 'loan_type', 'text', { options: LOAN_TYPES })}
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            {field('Current Balance ($)', 'balance', 'number', { placeholder: '0.00' })}
+            {field('Beginning Balance ($)', 'beginning_balance', 'number', { placeholder: '0.00' })}
+          </div>
+          <div className="grid grid-cols-3 gap-4">
+            {field('Monthly Payment ($)', 'monthly_payment', 'number', { placeholder: '0.00' })}
+            {field('Interest Rate (%)', 'interest_rate', 'number', { placeholder: '3.80' })}
+            {field('Term (months)', 'term_months', 'number', { placeholder: '84' })}
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            {field('Origination Date', 'origination_date', 'date')}
+            {field('Maturity Date', 'maturity_date', 'date')}
+          </div>
+          {field('Unit Numbers', 'unit_numbers', 'text', { placeholder: 'e.g. 53337-53361' })}
+          {field('Notes', 'notes', 'text', { placeholder: 'Optional notes' })}
+          {field('Auto Pull', 'auto_pull', 'checkbox')}
+        </div>
+
+        <div className="flex justify-end gap-3 px-6 py-4" style={{ borderTop: '1px solid #2C2A27' }}>
+          <button
+            onClick={onClose}
+            className="px-4 py-2 rounded-lg text-sm transition-colors hover:bg-white/5"
+            style={{ color: '#9A9690' }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onSave}
+            disabled={saving || !form.lender.trim() || !form.description.trim()}
+            className="px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-opacity disabled:opacity-50"
+            style={{ background: '#C8A96E', color: '#141210' }}
+          >
+            <Check className="w-4 h-4" />
+            {saving ? 'Saving…' : 'Save Loan'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Lender Row ─────────────────────────────────────────────────────────────
+
+function LenderGroup({
+  group, canEdit, onEdit, onDelete, onAdd
+}: {
+  group: LenderGroup;
+  canEdit: boolean;
+  onEdit: (loan: DebtLoan) => void;
+  onDelete: (id: string) => void;
+  onAdd: (lender: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  const highRate = group.loans.some(l => l.interest_rate >= 0.08);
+
+  return (
+    <div className="rounded-xl overflow-hidden" style={{ border: '1px solid #2C2A27' }}>
+      {/* Lender header */}
+      <button
+        onClick={() => setExpanded(e => !e)}
+        className="w-full flex items-center gap-3 px-5 py-4 text-left transition-colors hover:bg-white/[0.02]"
+        style={{ background: '#1A1917' }}
+      >
+        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: '#242220', border: '1px solid #2C2A27' }}>
+          <Building2 className="w-4 h-4" style={{ color: '#C8A96E' }} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold" style={{ color: '#F5F3EE' }}>{group.lender}</span>
+            {highRate && (
+              <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium" style={{ background: 'rgba(239,68,68,0.12)', color: '#F87171' }}>
+                <AlertTriangle className="w-3 h-3" />
+                High Rate
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-4 mt-0.5">
+            <span className="text-xs" style={{ color: '#9A9690' }}>
+              {group.loans.length} {group.loans.length === 1 ? 'loan' : 'loans'}
+            </span>
+            <span className="text-xs" style={{ color: '#9A9690' }}>
+              {fmt(group.totalMonthlyPayment)}/mo
+            </span>
+          </div>
+        </div>
+        <div className="text-right flex-shrink-0">
+          <div className="text-sm font-bold" style={{ color: group.totalBalance > 0 ? '#F5F3EE' : '#4ADE80' }}>
+            {fmt(group.totalBalance)}
+          </div>
+          <div className="text-xs mt-0.5" style={{ color: '#4A4844' }}>balance</div>
+        </div>
+        <div className="ml-3 flex-shrink-0">
+          {expanded
+            ? <ChevronDown className="w-4 h-4" style={{ color: '#9A9690' }} />
+            : <ChevronRight className="w-4 h-4" style={{ color: '#9A9690' }} />}
+        </div>
+      </button>
+
+      {/* Loans table */}
+      {expanded && (
+        <div style={{ background: '#111009', borderTop: '1px solid #2C2A27' }}>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr style={{ borderBottom: '1px solid #1E1C1A' }}>
+                  {['Description', 'Entity', 'Loan #', 'Type', 'Orig. Date', 'Mat. Date', 'Rate', 'Monthly Pmt', 'Beg. Balance', 'Balance', 'Units', ''].map(h => (
+                    <th key={h} className="px-4 py-2.5 text-left font-medium whitespace-nowrap" style={{ color: '#6B6865' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {group.loans.map(loan => (
+                  <tr key={loan.id} className="transition-colors hover:bg-white/[0.02]" style={{ borderBottom: '1px solid #1A1917' }}>
+                    <td className="px-4 py-3" style={{ color: '#C8C4BC' }}>
+                      <div>{loan.description}</div>
+                      {loan.notes && <div className="text-xs mt-0.5" style={{ color: '#4A4844' }}>{loan.notes}</div>}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      {loan.entity ? (
+                        <span className="px-2 py-0.5 rounded text-xs font-medium" style={{ background: '#1E1C1A', color: '#9A9690', border: '1px solid #2C2A27' }}>
+                          {loan.entity}
+                        </span>
+                      ) : <span style={{ color: '#4A4844' }}>—</span>}
+                    </td>
+                    <td className="px-4 py-3 font-mono whitespace-nowrap" style={{ color: '#6B6865' }}>{loan.loan_number || '—'}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <span className="px-2 py-0.5 rounded text-xs" style={{
+                        background: loan.loan_type === 'Capital Lease' ? 'rgba(99,102,241,0.12)' : 'rgba(200,169,110,0.1)',
+                        color: loan.loan_type === 'Capital Lease' ? '#A5B4FC' : '#C8A96E'
+                      }}>
+                        {loan.loan_type}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap" style={{ color: '#9A9690' }}>{fmtDate(loan.origination_date)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap" style={{ color: '#9A9690' }}>{fmtDate(loan.maturity_date)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap font-medium" style={{ color: loan.interest_rate >= 0.08 ? '#F87171' : loan.interest_rate >= 0.05 ? '#FCD34D' : '#C8C4BC' }}>
+                      {fmtRate(loan.interest_rate)}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap text-right font-medium" style={{ color: '#C8C4BC' }}>{fmtFull(loan.monthly_payment)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap text-right" style={{ color: '#6B6865' }}>{fmtFull(loan.beginning_balance)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap text-right font-bold" style={{ color: loan.balance <= 0 ? '#4ADE80' : '#F5F3EE' }}>
+                      {fmtFull(loan.balance)}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap max-w-[140px]" style={{ color: '#9A9690' }}>
+                      <div className="truncate">{loan.unit_numbers || '—'}</div>
+                      {loan.auto_pull && <div className="text-xs" style={{ color: '#4ADE80' }}>Auto Pull</div>}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      {canEdit && (
+                        <div className="flex items-center gap-1.5">
+                          <button onClick={() => onEdit(loan)} className="p-1.5 rounded-lg transition-colors hover:bg-white/[0.06]">
+                            <Edit2 className="w-3.5 h-3.5" style={{ color: '#6B6865' }} />
+                          </button>
+                          <button onClick={() => onDelete(loan.id)} className="p-1.5 rounded-lg transition-colors hover:bg-red-500/10">
+                            <Trash2 className="w-3.5 h-3.5" style={{ color: '#6B6865' }} />
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {canEdit && (
+            <div className="px-4 py-2.5" style={{ borderTop: '1px solid #1E1C1A' }}>
+              <button
+                onClick={() => onAdd(group.lender)}
+                className="flex items-center gap-1.5 text-xs transition-colors hover:opacity-80"
+                style={{ color: '#C8A96E' }}
+              >
+                <Plus className="w-3.5 h-3.5" /> Add loan to {group.lender}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main Component ─────────────────────────────────────────────────────────
+
+interface DebtReportProps {
+  tabId: string;
+  uploaderName: string;
+}
+
+export default function DebtReport({ tabId, uploaderName }: DebtReportProps) {
+  const [loans, setLoans] = useState<DebtLoan[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+  const [locked, setLocked] = useState(false);
+  const [togglingLock, setTogglingLock] = useState(false);
+  const [editingLoan, setEditingLoan] = useState<DebtLoan | null>(null);
+  const [addingLender, setAddingLender] = useState<string | null>(null);
+  const [form, setForm] = useState<EditForm>(blankEditForm());
+  const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const canEdit = uploaderName.trim() !== '' && !locked;
+
+  const loadLoans = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    const { data, error: err } = await supabase
+      .from('debt_loans')
+      .select('*')
+      .eq('tab_id', tabId)
+      .order('sort_order')
+      .order('lender');
+    if (err) { setError(err.message); setLoading(false); return; }
+    setLoans((data ?? []) as DebtLoan[]);
+    setLoading(false);
+  }, [tabId]);
+
+  useEffect(() => { loadLoans(); }, [loadLoans]);
+
+  // ── Derived state ──
+
+  const filtered = search
+    ? loans.filter(l =>
+        l.lender.toLowerCase().includes(search.toLowerCase()) ||
+        l.description.toLowerCase().includes(search.toLowerCase()) ||
+        l.unit_numbers.toLowerCase().includes(search.toLowerCase()) ||
+        l.loan_number.toLowerCase().includes(search.toLowerCase()) ||
+        l.entity.toLowerCase().includes(search.toLowerCase())
+      )
+    : loans;
+
+  const groups: LenderGroup[] = [];
+  const lenderMap = new Map<string, LenderGroup>();
+  for (const loan of filtered) {
+    if (!lenderMap.has(loan.lender)) {
+      const g: LenderGroup = { lender: loan.lender, loans: [], totalBalance: 0, totalMonthlyPayment: 0 };
+      lenderMap.set(loan.lender, g);
+      groups.push(g);
+    }
+    const g = lenderMap.get(loan.lender)!;
+    g.loans.push(loan);
+    g.totalBalance += loan.balance;
+    g.totalMonthlyPayment += loan.monthly_payment;
+  }
+
+  const totalBalance = loans.reduce((s, l) => s + l.balance, 0);
+  const totalMonthly = loans.reduce((s, l) => s + l.monthly_payment, 0);
+  const weightedRate = loans.reduce((s, l) => s + l.interest_rate * l.balance, 0) / (totalBalance || 1);
+  const lenderCount = new Set(loans.map(l => l.lender)).size;
+
+  // ── Handlers ──
+
+  async function toggleLock() {
+    setTogglingLock(true);
+    setLocked(l => !l);
+    setTogglingLock(false);
+  }
+
+  function openEdit(loan: DebtLoan) {
+    setEditingLoan(loan);
+    setForm(loanToForm(loan));
+  }
+
+  function openAdd(lender: string) {
+    setAddingLender(lender);
+    setForm(blankEditForm(tabId, lender));
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    const payload = {
+      tab_id: tabId,
+      lender: form.lender.trim(),
+      loan_number: form.loan_number.trim(),
+      description: form.description.trim(),
+      entity: form.entity,
+      balance: parseFloat(form.balance) || 0,
+      origination_date: form.origination_date || null,
+      maturity_date: form.maturity_date || null,
+      term_months: form.term_months ? parseInt(form.term_months) : null,
+      interest_rate: parseFloat(form.interest_rate) / 100 || 0,
+      monthly_payment: parseFloat(form.monthly_payment) || 0,
+      beginning_balance: parseFloat(form.beginning_balance) || 0,
+      loan_type: form.loan_type,
+      unit_numbers: form.unit_numbers.trim(),
+      auto_pull: form.auto_pull,
+      notes: form.notes.trim(),
+      sort_order: editingLoan?.sort_order ?? (loans.length + 1) * 10,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (editingLoan) {
+      const { error: err } = await supabase
+        .from('debt_loans')
+        .update(payload)
+        .eq('id', editingLoan.id);
+      if (err) { setSaving(false); return; }
+    } else {
+      const { error: err } = await supabase
+        .from('debt_loans')
+        .insert({ ...payload });
+      if (err) { setSaving(false); return; }
+    }
+
+    setSaving(false);
+    setEditingLoan(null);
+    setAddingLender(null);
+    loadLoans();
+  }
+
+  async function handleDelete(id: string) {
+    if (!confirm('Delete this loan?')) return;
+    setDeletingId(id);
+    await supabase.from('debt_loans').delete().eq('id', id);
+    setDeletingId(id);
+    setLoans(prev => prev.filter(l => l.id !== id));
+    setDeletingId(null);
+  }
+
+  // ── Render ──
+
+  return (
+    <div className="flex flex-col h-full overflow-hidden" style={{ background: '#0F0E0C' }}>
+      {/* Header */}
+      <div className="flex-shrink-0 px-8 pt-8 pb-6">
+        <div className="flex items-start justify-between gap-4 mb-8">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight" style={{ color: '#F5F3EE' }}>Debt Schedule</h1>
+            <p className="text-sm mt-1" style={{ color: '#6B6865' }}>
+              As of January 31, 2026 · Effective avg rate: {(weightedRate * 100).toFixed(2)}%
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            {canEdit !== undefined && (
+              <button
+                onClick={toggleLock}
+                disabled={togglingLock}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors"
+                style={{ background: locked ? 'rgba(200,169,110,0.1)' : '#1A1917', border: '1px solid #2C2A27', color: locked ? '#C8A96E' : '#9A9690' }}
+              >
+                {locked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                {locked ? 'Locked' : 'Unlocked'}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Summary cards */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+          {[
+            { label: 'Total Debt', value: fmt(totalBalance), icon: DollarSign, color: '#F5F3EE', sub: `${loans.length} loans` },
+            { label: 'Monthly Payments', value: fmt(totalMonthly), icon: Calendar, color: '#C8A96E', sub: `${fmt(totalMonthly * 12)}/yr` },
+            { label: 'Weighted Avg Rate', value: (weightedRate * 100).toFixed(2) + '%', icon: Percent, color: weightedRate >= 0.07 ? '#F87171' : '#4ADE80', sub: 'effective rate' },
+            { label: 'Lenders', value: String(lenderCount), icon: Building2, color: '#A8C5DA', sub: `${groups.length} active` },
+          ].map(card => (
+            <div key={card.label} className="rounded-xl p-4" style={{ background: '#141210', border: '1px solid #2C2A27' }}>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-medium" style={{ color: '#6B6865' }}>{card.label}</span>
+                <card.icon className="w-4 h-4" style={{ color: card.color }} />
+              </div>
+              <div className="text-xl font-bold" style={{ color: card.color }}>{card.value}</div>
+              <div className="text-xs mt-1" style={{ color: '#4A4844' }}>{card.sub}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Search + Add */}
+        <div className="flex items-center gap-3">
+          <div className="relative flex-1 max-w-sm">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4" style={{ color: '#4A4844' }} />
+            <input
+              type="text"
+              placeholder="Search lender, description, units…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="w-full pl-9 pr-4 py-2 rounded-lg text-sm outline-none"
+              style={{ background: '#141210', border: '1px solid #2C2A27', color: '#F5F3EE' }}
+            />
+          </div>
+          {canEdit && (
+            <button
+              onClick={() => openAdd('')}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-opacity hover:opacity-80"
+              style={{ background: '#C8A96E', color: '#141210' }}
+            >
+              <Plus className="w-4 h-4" /> Add Loan
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto px-8 pb-8">
+        {loading ? (
+          <div className="flex items-center justify-center py-20">
+            <div className="w-6 h-6 border-2 rounded-full animate-spin" style={{ borderColor: '#2C2A27', borderTopColor: '#C8A96E' }} />
+          </div>
+        ) : error ? (
+          <div className="flex items-center gap-2 p-4 rounded-xl" style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>
+            <AlertTriangle className="w-4 h-4 flex-shrink-0" style={{ color: '#F87171' }} />
+            <span className="text-sm" style={{ color: '#F87171' }}>{error}</span>
+          </div>
+        ) : groups.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-20 gap-3">
+            <TrendingDown className="w-10 h-10" style={{ color: '#2C2A27' }} />
+            <p className="text-sm" style={{ color: '#4A4844' }}>
+              {search ? 'No results found.' : 'No debt records found.'}
+            </p>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {groups.map(group => (
+              <LenderGroup
+                key={group.lender}
+                group={group}
+                canEdit={canEdit}
+                onEdit={openEdit}
+                onDelete={handleDelete}
+                onAdd={openAdd}
+              />
+            ))}
+
+            {/* Grand total */}
+            <div className="rounded-xl px-5 py-4 flex items-center justify-between" style={{ background: '#1A1917', border: '1px solid #2C2A27' }}>
+              <div>
+                <div className="text-sm font-semibold" style={{ color: '#F5F3EE' }}>Grand Total</div>
+                <div className="text-xs mt-0.5" style={{ color: '#6B6865' }}>{loans.length} loans across {lenderCount} lenders</div>
+              </div>
+              <div className="text-right">
+                <div className="text-xl font-bold" style={{ color: '#F5F3EE' }}>{fmtFull(totalBalance)}</div>
+                <div className="text-xs mt-0.5" style={{ color: '#6B6865' }}>{fmtFull(totalMonthly)}/mo</div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Loan form modal */}
+      {(editingLoan || addingLender !== null) && (
+        <LoanModal
+          form={form}
+          setForm={setForm}
+          onSave={handleSave}
+          onClose={() => { setEditingLoan(null); setAddingLender(null); }}
+          title={editingLoan ? 'Edit Loan' : 'Add New Loan'}
+          saving={saving}
+        />
+      )}
+
+      {/* Delete spinner overlay */}
+      {deletingId && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.4)' }}>
+          <div className="w-8 h-8 border-2 rounded-full animate-spin" style={{ borderColor: '#2C2A27', borderTopColor: '#C8A96E' }} />
+        </div>
+      )}
+    </div>
+  );
+}
