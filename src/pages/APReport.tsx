@@ -512,32 +512,14 @@ export default function APReport({ tabId, uploaderName }: APReportProps) {
   }
 
   async function toggleLock() {
+    if (!reportId) return;
     setLockToggling(true);
     try {
-      let id = reportId;
-
-      if (!id) {
-        const { data } = await supabase
-          .from('ap_reports')
-          .select('id')
-          .eq('tab_id', tabId)
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        id = data?.id ?? null;
-        if (id) setReportId(id);
-      }
-
-      if (!id) {
-        console.error('toggleLock: could not find report id');
-        return;
-      }
-
       const next = !locked;
       const { error: err } = await supabase
         .from('ap_reports')
         .update({ locked: next })
-        .eq('id', id);
+        .eq('id', reportId);
 
       if (err) {
         console.error('Lock toggle failed:', err);
