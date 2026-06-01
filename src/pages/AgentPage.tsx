@@ -4,12 +4,25 @@ import { Send, X, Loader2, CheckCircle, Minus } from 'lucide-react';
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
 
+const EXECUTIVE_NAMES = ['james cooper', 'zach meiborg', 'megan dierks', 'tony askins', 'dallas marcum'];
+
 function getMemberContext() {
   try {
     const m = JSON.parse(sessionStorage.getItem('portal_member') ?? 'null');
     if (!m) return null;
     return { full_name: m.full_name, position: m.position ?? null, department: m.department ?? null };
   } catch { return null; }
+}
+
+function getAgentEndpoint(member: { full_name?: string; position?: string | null; department?: string | null } | null): string {
+  if (!member?.full_name) return 'gemini-agent';
+  const name = member.full_name.toLowerCase().trim();
+  if (EXECUTIVE_NAMES.includes(name)) return 'ai-agent';
+  const pos = (member.position ?? '').toLowerCase();
+  const dept = (member.department ?? '').toLowerCase();
+  const isAccounting = dept === 'accounting' || pos.includes('accounting') || pos.includes('billing') ||
+    pos.includes('payroll') || pos.includes('controller') || pos.includes('accounts');
+  return isAccounting ? 'ai-agent' : 'gemini-agent';
 }
 
 interface Message {
@@ -97,6 +110,8 @@ function ChatPanel({ formContext, userName, onClose }: { formContext?: string; u
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const isFormContext = formContext && FORM_TABS.includes(formContext);
+  const memberContext = getMemberContext();
+  const agentEndpoint = getAgentEndpoint(memberContext);
 
   useEffect(() => {
     const greeting = isFormContext
@@ -116,7 +131,7 @@ function ChatPanel({ formContext, userName, onClose }: { formContext?: string; u
     setInput('');
     setLoading(true);
     try {
-      const res = await fetch(`${SUPABASE_URL}/functions/v1/ai-agent`, {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/${agentEndpoint}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -126,7 +141,7 @@ function ChatPanel({ formContext, userName, onClose }: { formContext?: string; u
         body: JSON.stringify({
           messages: next.map(m => ({ role: m.role, content: m.content })),
           formContext,
-          memberContext: getMemberContext(),
+          memberContext: memberContext,
         }),
       });
       const data = await res.json();
