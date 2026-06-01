@@ -428,6 +428,7 @@ export default function APReport({ tabId, uploaderName }: APReportProps) {
   const [report, setReport] = useState<APReportData | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
+  const [lockToggling, setLockToggling] = useState(false);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [search, setSearch] = useState('');
@@ -511,10 +512,41 @@ export default function APReport({ tabId, uploaderName }: APReportProps) {
   }
 
   async function toggleLock() {
-    if (!reportId) return;
-    const newLocked = !locked;
-    await supabase.from('ap_reports').update({ locked: newLocked }).eq('id', reportId);
-    setLocked(newLocked);
+    setLockToggling(true);
+    try {
+      let id = reportId;
+
+      if (!id) {
+        const { data } = await supabase
+          .from('ap_reports')
+          .select('id')
+          .eq('tab_id', tabId)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        id = data?.id ?? null;
+        if (id) setReportId(id);
+      }
+
+      if (!id) {
+        console.error('toggleLock: could not find report id');
+        return;
+      }
+
+      const next = !locked;
+      const { error: err } = await supabase
+        .from('ap_reports')
+        .update({ locked: next })
+        .eq('id', id);
+
+      if (err) {
+        console.error('Lock toggle failed:', err);
+      } else {
+        setLocked(next);
+      }
+    } finally {
+      setLockToggling(false);
+    }
   }
 
   const filtered = report
@@ -553,18 +585,34 @@ export default function APReport({ tabId, uploaderName }: APReportProps) {
               />
             </div>
           )}
-          {report && (
+          {report && !locked && (
             <button
               onClick={toggleLock}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
-              style={{
-                background: locked ? 'rgba(248,113,113,0.1)' : '#1A1917',
-                border: locked ? '1px solid rgba(248,113,113,0.3)' : '1px solid #2C2A27',
-                color: locked ? '#F87171' : '#9A9690',
-              }}
+              disabled={lockToggling}
+              title="Lock report"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
+              style={{ background: '#1A1917', color: '#9A9690', border: '1px solid #2C2A27' }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#2A1010'; e.currentTarget.style.color = '#FCA5A5'; e.currentTarget.style.borderColor = '#7F1D1D'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = '#1A1917'; e.currentTarget.style.color = '#9A9690'; e.currentTarget.style.borderColor = '#2C2A27'; }}
             >
-              {locked ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
-              {locked ? 'Locked — Unlock' : 'Lock'}
+              {lockToggling
+                ? <div className="w-3 h-3 border-2 rounded-full animate-spin" style={{ borderColor: '#4A4844', borderTopColor: '#9A9690' }} />
+                : <><Unlock className="w-3 h-3" strokeWidth={2} />Lock</>}
+            </button>
+          )}
+          {report && locked && (
+            <button
+              onClick={toggleLock}
+              disabled={lockToggling}
+              title="Unlock report"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
+              style={{ background: '#2A1010', color: '#EF4444', border: '1px solid #7F1D1D' }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#1A2A1A'; e.currentTarget.style.color = '#4ADE80'; e.currentTarget.style.borderColor = '#166534'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = '#2A1010'; e.currentTarget.style.color = '#EF4444'; e.currentTarget.style.borderColor = '#7F1D1D'; }}
+            >
+              {lockToggling
+                ? <div className="w-3 h-3 border-2 rounded-full animate-spin" style={{ borderColor: '#7F1D1D', borderTopColor: '#EF4444' }} />
+                : <><Lock className="w-3 h-3" strokeWidth={2} />Locked — Unlock</>}
             </button>
           )}
           {!locked && (
