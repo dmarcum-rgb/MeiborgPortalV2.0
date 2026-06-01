@@ -317,7 +317,7 @@ function parseCsvSchedules(csv: string): Map<string, AmortRow[]> {
 
     let dateLabel = '';
     if (rawDate) {
-      dateLabel = rawDate.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+      dateLabel = rawDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
     } else if (cols[17]?.trim()) {
       dateLabel = cols[17].trim();
     }
@@ -375,7 +375,7 @@ function buildFallbackSchedule(loan: DebtLoan): AmortRow[] {
     const payment = Math.min(loan.monthly_payment, balance + interest);
     const principal = payment - interest;
     const ending = Math.max(0, balance - principal);
-    const mo = cursor.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    const mo = cursor.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
     rows.push({ n, date: mo, rawDate: new Date(cursor), opening: balance, interest, principal, ending, payment, notes: '', fromCsv: false });
     balance = ending;
     cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, cursor.getDate());
