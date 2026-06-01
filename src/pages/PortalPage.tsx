@@ -5,6 +5,7 @@ import APReport from './APReport';
 import DebtReport from './DebtReport';
 import DebtCalendar from './DebtCalendar';
 import CollectionsReport from './CollectionsReport';
+import UnbilledOrdersReport from './UnbilledOrdersReport';
 import {
   MessageSquare, Shield, Network, Home, FileText, Users, Star, Bell,
   BookOpen, Briefcase, Calendar, Heart, Image,
@@ -1909,6 +1910,7 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
   const isDebtTab = activeTab?.label?.toLowerCase() === 'debts';
   const isCalendarTab = activeTab?.label?.toLowerCase().includes('payment calendar') ?? false;
   const isCollectionsTab = activeTab?.label?.toLowerCase() === 'collections';
+  const isUnbilledOrdersTab = activeTab?.label?.toLowerCase() === 'unbilled orders';
   // Any dept folder tab → full screen mode
   const isDeptTab = activeTabId != null && activeFolder != null;
 
@@ -2067,6 +2069,8 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
                 <DebtCalendar tabId={activeTabId} />
               ) : isCollectionsTab && activeTabId ? (
                 <CollectionsReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
+              ) : isUnbilledOrdersTab && activeTabId ? (
+                <UnbilledOrdersReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
               ) : (
                 <div className="flex flex-col items-center justify-center h-full gap-3">
                   <div className="w-14 h-14 rounded-2xl flex items-center justify-center" style={{ background: '#1A1917', border: '1px solid #262422' }}>
