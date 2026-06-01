@@ -2125,7 +2125,7 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
                             style={m.role === 'user'
                               ? { background: '#2C2A27', color: '#F5F3EE' }
                               : { background: '#1A1917', color: '#C0BDB7', border: '1px solid #262422' }}>
-                            {m.role === 'assistant' ? renderTextFull(m.content) : m.content}
+                            {m.role === 'assistant' ? renderChatText(m.content) : m.content}
                           </div>
                         </div>
                       ))}
@@ -2221,7 +2221,7 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
                         style={m.role === 'user'
                           ? { background: '#2C2A27', color: '#F5F3EE' }
                           : { background: '#1A1917', color: '#C0BDB7', border: '1px solid #262422' }}>
-                        {m.role === 'assistant' ? renderTextFull(m.content) : m.content}
+                        {m.role === 'assistant' ? renderChatText(m.content) : m.content}
                       </div>
                     </div>
                   ))}
