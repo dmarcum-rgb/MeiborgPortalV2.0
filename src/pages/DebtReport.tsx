@@ -523,13 +523,14 @@ function LenderGroup({
 
   const highRate = group.loans.some(l => l.interest_rate >= 0.08);
 
+
   return (
     <div className="rounded-xl overflow-hidden" style={{ border: '1px solid #2C2A27' }}>
       {/* Lender header */}
-      <button
-        onClick={() => setExpanded(e => !e)}
-        className="w-full flex items-center gap-3 px-5 py-4 text-left transition-colors hover:bg-white/[0.02]"
+      <div
+        className="w-full flex items-center gap-3 px-5 py-4 text-left transition-colors hover:bg-white/[0.02] cursor-pointer"
         style={{ background: '#1A1917' }}
+        onClick={group.loans.length === 1 ? undefined : () => setExpanded(e => !e)}
       >
         <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: '#242220', border: '1px solid #2C2A27' }}>
           <Building2 className="w-4 h-4" style={{ color: '#C8A96E' }} />
@@ -559,12 +560,24 @@ function LenderGroup({
           </div>
           <div className="text-xs mt-0.5" style={{ color: '#4A4844' }}>balance</div>
         </div>
-        <div className="ml-3 flex-shrink-0">
-          {expanded
-            ? <ChevronDown className="w-4 h-4" style={{ color: '#9A9690' }} />
-            : <ChevronRight className="w-4 h-4" style={{ color: '#9A9690' }} />}
-        </div>
-      </button>
+        {/* Single loan: show schedule icon; multi-loan: show expand chevron */}
+        {group.loans.length === 1 ? (
+          <button
+            onClick={e => { e.stopPropagation(); onAmortize(group.loans[0]); }}
+            className="ml-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex-shrink-0"
+            style={{ background: 'rgba(200,169,110,0.1)', border: '1px solid rgba(200,169,110,0.2)', color: '#C8A96E' }}
+          >
+            <TableProperties className="w-3.5 h-3.5" />
+            Schedule
+          </button>
+        ) : (
+          <div className="ml-3 flex-shrink-0">
+            {expanded
+              ? <ChevronDown className="w-4 h-4" style={{ color: '#9A9690' }} />
+              : <ChevronRight className="w-4 h-4" style={{ color: '#9A9690' }} />}
+          </div>
+        )}
+      </div>
 
       {/* Loans table */}
       {expanded && (
@@ -580,9 +593,14 @@ function LenderGroup({
               </thead>
               <tbody>
                 {group.loans.map(loan => (
-                  <tr key={loan.id} className="transition-colors hover:bg-white/[0.02]" style={{ borderBottom: '1px solid #1A1917' }}>
+                  <tr
+                    key={loan.id}
+                    className="transition-colors hover:bg-white/[0.03] cursor-pointer"
+                    style={{ borderBottom: '1px solid #1A1917' }}
+                    onClick={() => onAmortize(loan)}
+                  >
                     <td className="px-4 py-3" style={{ color: '#C8C4BC' }}>
-                      <div>{loan.description}</div>
+                      <div className="font-medium">{loan.description}</div>
                       {loan.notes && <div className="text-xs mt-0.5" style={{ color: '#4A4844' }}>{loan.notes}</div>}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
@@ -615,14 +633,16 @@ function LenderGroup({
                       <div className="truncate">{loan.unit_numbers || '—'}</div>
                       {loan.auto_pull && <div className="text-xs" style={{ color: '#4ADE80' }}>Auto Pull</div>}
                     </td>
-                    <td className="px-4 py-3 whitespace-nowrap">
+                    <td className="px-4 py-3 whitespace-nowrap" onClick={e => e.stopPropagation()}>
                       <div className="flex items-center gap-1.5">
                         <button
                           onClick={() => onAmortize(loan)}
-                          className="p-1.5 rounded-lg transition-colors hover:bg-white/[0.06]"
+                          className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-colors hover:bg-white/[0.06]"
                           title="Amortization schedule"
+                          style={{ background: 'rgba(200,169,110,0.08)', color: '#C8A96E' }}
                         >
-                          <TableProperties className="w-3.5 h-3.5" style={{ color: '#C8A96E' }} />
+                          <TableProperties className="w-3 h-3" />
+                          Schedule
                         </button>
                         {canEdit && (
                           <>

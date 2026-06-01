@@ -1,14 +1,16 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  ChevronLeft, ChevronRight, DollarSign, Building2, AlertCircle
+  ChevronLeft, ChevronRight, DollarSign, Building2, AlertCircle, FileText
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import compiledCsv from '../assets/Compiled_Amortization_Schedules.csv?raw';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
 interface DebtLoan {
   id: string;
   lender: string;
+  loan_number: string;
   description: string;
   entity: string;
   balance: number;
@@ -20,18 +22,33 @@ interface DebtLoan {
   auto_pull: boolean;
 }
 
+interface CsvPaymentRow {
+  glNum: string;
+  lender: string;
+  description: string;
+  pmtNum: number;
+  date: Date;
+  payment: number | null;
+  principal: number | null;
+  interest: number | null;
+  ending: number | null;
+}
+
 interface PaymentEvent {
   lender: string;
   description: string;
   entity: string;
   amount: number;
-  balance: number;
+  balance: number | null;
   interest_rate: number;
   loan_type: string;
   auto_pull: boolean;
   maturity_date: string | null;
-  /** true if this month is the final payment */
+  interest: number | null;
+  principal: number | null;
+  ending: number | null;
   isFinal: boolean;
+  fromCsv: boolean;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -48,53 +65,146 @@ function fmtFull(n: number): string {
   return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
 }
 
-/** Returns day-of-month (1-based) that payment is due for a loan, based on origination_date. */
-function paymentDay(loan: DebtLoan): number {
-  if (loan.origination_date) {
-    const d = new Date(loan.origination_date + 'T12:00:00');
-    return d.getDate();
+function parseMoney(s: string): number | null {
+  if (!s || s.trim() === '') return null;
+  const n = parseFloat(s.replace(/[$,\s]/g, ''));
+  return isNaN(n) ? null : n;
+}
+
+function parseDate(s: string): Date | null {
+  if (!s || s.trim() === '') return null;
+  const parts = s.trim().split('/');
+  if (parts.length === 3) {
+    const m = parseInt(parts[0], 10);
+    const d = parseInt(parts[1], 10);
+    const y = parseInt(parts[2], 10);
+    if (!isNaN(m) && !isNaN(d) && !isNaN(y)) return new Date(y, m - 1, d);
   }
-  return 1;
+  return null;
 }
 
-/** Check if a loan has an active payment in a given year/month (1-based) */
-function loanActiveInMonth(loan: DebtLoan, year: number, month: number): boolean {
-  if (!loan.origination_date) return false;
-  if (loan.balance <= 0 && loan.monthly_payment <= 0) return false;
+function parseCsvPayments(csv: string): Map<string, CsvPaymentRow[]> {
+  const map = new Map<string, CsvPaymentRow[]>();
+  const lines = csv.split('\n');
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
 
-  const orig = new Date(loan.origination_date + 'T12:00:00');
-  const origYear = orig.getFullYear();
-  const origMonth = orig.getMonth() + 1;
+    const cols: string[] = [];
+    let cur = '';
+    let inQuote = false;
+    for (let c = 0; c < line.length; c++) {
+      const ch = line[c];
+      if (ch === '"') { inQuote = !inQuote; }
+      else if (ch === ',' && !inQuote) { cols.push(cur); cur = ''; }
+      else { cur += ch; }
+    }
+    cols.push(cur);
 
-  // Payment starts the month after origination (or same month)
-  const startYear = origMonth === 12 ? origYear + 1 : origYear;
-  const startMonth = origMonth === 12 ? 1 : origMonth + 1;
+    const glNum = cols[2]?.trim();
+    if (!glNum) continue;
+    const pmtNum = parseInt(cols[16]?.trim(), 10);
+    if (isNaN(pmtNum)) continue;
+    const date = parseDate(cols[17]?.trim());
+    if (!date) continue;
 
-  if (year < startYear || (year === startYear && month < startMonth)) return false;
+    const payment = parseMoney(cols[18]);
+    const principal = parseMoney(cols[19]);
+    const interest = parseMoney(cols[20]);
+    const ending = parseMoney(cols[21]);
 
-  if (loan.maturity_date) {
-    const mat = new Date(loan.maturity_date + 'T12:00:00');
-    const matYear = mat.getFullYear();
-    const matMonth = mat.getMonth() + 1;
-    if (year > matYear || (year === matYear && month > matMonth)) return false;
+    const row: CsvPaymentRow = {
+      glNum,
+      lender: cols[1]?.trim() ?? '',
+      description: cols[4]?.trim() ?? '',
+      pmtNum,
+      date,
+      payment,
+      principal,
+      interest,
+      ending,
+    };
+
+    if (!map.has(glNum)) map.set(glNum, []);
+    map.get(glNum)!.push(row);
   }
-
-  return true;
+  return map;
 }
 
-function isFinalPaymentMonth(loan: DebtLoan, year: number, month: number): boolean {
-  if (!loan.maturity_date) return false;
-  const mat = new Date(loan.maturity_date + 'T12:00:00');
-  return mat.getFullYear() === year && mat.getMonth() + 1 === month;
-}
-
-/** Build a map of day → payments for a given year/month */
-function buildPaymentMap(loans: DebtLoan[], year: number, month: number): Map<number, PaymentEvent[]> {
+/** Build a map of day → payments for a given year/month using CSV data */
+function buildCsvPaymentMap(
+  loans: DebtLoan[],
+  csvMap: Map<string, CsvPaymentRow[]>,
+  year: number,
+  month: number
+): Map<number, PaymentEvent[]> {
   const map = new Map<number, PaymentEvent[]>();
+
+  // Build a lookup from loan_number → loan info
+  const loanByGl = new Map<string, DebtLoan>();
   for (const loan of loans) {
-    if (!loanActiveInMonth(loan, year, month)) continue;
-    const day = paymentDay(loan);
+    if (loan.loan_number) loanByGl.set(loan.loan_number, loan);
+  }
+
+  for (const [glNum, rows] of csvMap.entries()) {
+    const loan = loanByGl.get(glNum);
+    if (!loan) continue;
+
+    // Find all rows for this month/year that have payment data
+    for (const row of rows) {
+      if (row.date.getFullYear() !== year || row.date.getMonth() + 1 !== month) continue;
+      // Include rows even if payment is null (scheduled but not yet paid)
+      const day = row.date.getDate();
+      if (!map.has(day)) map.set(day, []);
+
+      // Find the last row with data to determine if this is the final payment
+      const lastDataRow = [...rows].reverse().find(r => r.ending !== null && r.ending <= 0.01);
+      const isFinal = lastDataRow
+        ? lastDataRow.date.getFullYear() === year && lastDataRow.date.getMonth() + 1 === month
+        : false;
+
+      map.get(day)!.push({
+        lender: loan.lender,
+        description: loan.description,
+        entity: loan.entity,
+        amount: row.payment ?? loan.monthly_payment,
+        balance: row.ending,
+        interest_rate: loan.interest_rate,
+        loan_type: loan.loan_type,
+        auto_pull: loan.auto_pull,
+        maturity_date: loan.maturity_date,
+        interest: row.interest,
+        principal: row.principal,
+        ending: row.ending,
+        isFinal,
+        fromCsv: true,
+      });
+    }
+  }
+
+  // Also add loans not in CSV using origination-date fallback
+  for (const loan of loans) {
+    if (loan.loan_number && csvMap.has(loan.loan_number)) continue;
+    if (!loan.origination_date) continue;
+    if (loan.balance <= 0 && loan.monthly_payment <= 0) continue;
+
+    const orig = new Date(loan.origination_date + 'T12:00:00');
+    const origYear = orig.getFullYear();
+    const origMonth = orig.getMonth() + 1;
+    const startYear = origMonth === 12 ? origYear + 1 : origYear;
+    const startMonth = origMonth === 12 ? 1 : origMonth + 1;
+    if (year < startYear || (year === startYear && month < startMonth)) continue;
+
+    if (loan.maturity_date) {
+      const mat = new Date(loan.maturity_date + 'T12:00:00');
+      if (year > mat.getFullYear() || (year === mat.getFullYear() && month > mat.getMonth() + 1)) continue;
+    }
+
+    const day = orig.getDate();
     if (!map.has(day)) map.set(day, []);
+    const isFinal = loan.maturity_date
+      ? new Date(loan.maturity_date + 'T12:00:00').getFullYear() === year && new Date(loan.maturity_date + 'T12:00:00').getMonth() + 1 === month
+      : false;
     map.get(day)!.push({
       lender: loan.lender,
       description: loan.description,
@@ -105,9 +215,14 @@ function buildPaymentMap(loans: DebtLoan[], year: number, month: number): Map<nu
       loan_type: loan.loan_type,
       auto_pull: loan.auto_pull,
       maturity_date: loan.maturity_date,
-      isFinal: isFinalPaymentMonth(loan, year, month),
+      interest: null,
+      principal: null,
+      ending: null,
+      isFinal,
+      fromCsv: false,
     });
   }
+
   return map;
 }
 
@@ -122,14 +237,21 @@ function DayDetail({ day, year, month, events, onClose }: {
 }) {
   const total = events.reduce((s, e) => s + e.amount, 0);
   const dateStr = new Date(year, month - 1, day).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  const csvCount = events.filter(e => e.fromCsv).length;
 
   return (
     <div className="flex flex-col h-full" style={{ background: '#141210', borderLeft: '1px solid #2C2A27' }}>
       <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid #2C2A27' }}>
         <div>
           <div className="text-sm font-semibold" style={{ color: '#F5F3EE' }}>{dateStr}</div>
-          <div className="text-xs mt-0.5" style={{ color: '#6B6865' }}>
-            {events.length} payment{events.length !== 1 ? 's' : ''} · {fmt(total)} total
+          <div className="text-xs mt-0.5 flex items-center gap-2" style={{ color: '#6B6865' }}>
+            <span>{events.length} payment{events.length !== 1 ? 's' : ''} · {fmt(total)} total</span>
+            {csvCount > 0 && (
+              <span className="flex items-center gap-1 px-1.5 py-0.5 rounded" style={{ background: 'rgba(74,222,128,0.08)', color: '#4ADE80', fontSize: '10px' }}>
+                <FileText className="w-2.5 h-2.5" />
+                Actual
+              </span>
+            )}
           </div>
         </div>
         <button onClick={onClose} className="p-1.5 rounded-lg transition-colors hover:bg-white/5">
@@ -149,6 +271,21 @@ function DayDetail({ day, year, month, events, onClose }: {
                 <div className="text-sm font-bold" style={{ color: '#C8A96E' }}>{fmtFull(e.amount)}</div>
               </div>
             </div>
+
+            {/* Principal / Interest breakdown if available */}
+            {(e.principal !== null || e.interest !== null) && (
+              <div className="grid grid-cols-2 gap-2 mb-2 p-2 rounded-lg" style={{ background: '#141210' }}>
+                <div>
+                  <div className="text-xs" style={{ color: '#4A4844' }}>Principal</div>
+                  <div className="text-xs font-medium" style={{ color: '#4ADE80' }}>{e.principal !== null ? fmtFull(e.principal) : '—'}</div>
+                </div>
+                <div>
+                  <div className="text-xs" style={{ color: '#4A4844' }}>Interest</div>
+                  <div className="text-xs font-medium" style={{ color: '#F87171' }}>{e.interest !== null ? fmtFull(e.interest) : '—'}</div>
+                </div>
+              </div>
+            )}
+
             <div className="flex flex-wrap gap-1.5 mt-2">
               {e.entity && (
                 <span className="px-2 py-0.5 rounded text-xs" style={{ background: '#242220', border: '1px solid #2C2A27', color: '#9A9690' }}>
@@ -176,8 +313,10 @@ function DayDetail({ day, year, month, events, onClose }: {
               )}
             </div>
             <div className="mt-2 pt-2 flex justify-between" style={{ borderTop: '1px solid #242220' }}>
-              <span className="text-xs" style={{ color: '#4A4844' }}>Balance</span>
-              <span className="text-xs font-medium" style={{ color: '#C8C4BC' }}>{fmt(e.balance)}</span>
+              <span className="text-xs" style={{ color: '#4A4844' }}>Ending Balance</span>
+              <span className="text-xs font-medium" style={{ color: '#C8C4BC' }}>
+                {e.ending !== null ? fmt(e.ending) : e.balance !== null ? fmt(e.balance) : '—'}
+              </span>
             </div>
           </div>
         ))}
@@ -206,8 +345,9 @@ export default function DebtCalendar({ tabId }: DebtCalendarProps) {
   const [viewMonth, setViewMonth] = useState(today.getMonth() + 1); // 1-based
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
 
+  const csvPayments = useMemo(() => parseCsvPayments(compiledCsv), []);
+
   const loadLoans = useCallback(async () => {
-    // Fetch from the Debts tab — get tab_id for the Debts tab in the same folder
     const { data: debtTab } = await supabase
       .from('portal_tabs')
       .select('id')
@@ -218,7 +358,7 @@ export default function DebtCalendar({ tabId }: DebtCalendarProps) {
 
     const { data } = await supabase
       .from('debt_loans')
-      .select('id, lender, description, entity, balance, origination_date, maturity_date, monthly_payment, interest_rate, loan_type, auto_pull')
+      .select('id, lender, loan_number, description, entity, balance, origination_date, maturity_date, monthly_payment, interest_rate, loan_type, auto_pull')
       .eq('tab_id', debtTab.id)
       .order('lender');
 
@@ -245,10 +385,13 @@ export default function DebtCalendar({ tabId }: DebtCalendarProps) {
     setSelectedDay(null);
   }
 
-  const paymentMap = buildPaymentMap(loans, viewYear, viewMonth);
+  const paymentMap = useMemo(
+    () => buildCsvPaymentMap(loans, csvPayments, viewYear, viewMonth),
+    [loans, csvPayments, viewYear, viewMonth]
+  );
 
   // Calendar grid
-  const firstDayOfMonth = new Date(viewYear, viewMonth - 1, 1).getDay(); // 0=Sun
+  const firstDayOfMonth = new Date(viewYear, viewMonth - 1, 1).getDay();
   const daysInMonth = new Date(viewYear, viewMonth, 0).getDate();
   const daysInPrevMonth = new Date(viewYear, viewMonth - 1, 0).getDate();
 
@@ -265,10 +408,12 @@ export default function DebtCalendar({ tabId }: DebtCalendarProps) {
   }
 
   // Monthly summary
-  const monthlyTotal = Array.from(paymentMap.values()).flat().reduce((s, e) => s + e.amount, 0);
+  const allEvents = Array.from(paymentMap.values()).flat();
+  const monthlyTotal = allEvents.reduce((s, e) => s + e.amount, 0);
   const paymentDays = paymentMap.size;
-  const autoCount = Array.from(paymentMap.values()).flat().filter(e => e.auto_pull).length;
-  const finalCount = Array.from(paymentMap.values()).flat().filter(e => e.isFinal).length;
+  const autoCount = allEvents.filter(e => e.auto_pull).length;
+  const finalCount = allEvents.filter(e => e.isFinal).length;
+  const csvCount = allEvents.filter(e => e.fromCsv).length;
 
   const isToday = (day: number) =>
     day === today.getDate() && viewMonth === today.getMonth() + 1 && viewYear === today.getFullYear();
@@ -284,7 +429,7 @@ export default function DebtCalendar({ tabId }: DebtCalendarProps) {
           <div className="flex items-center justify-between mb-6">
             <div>
               <h1 className="text-2xl font-bold tracking-tight" style={{ color: '#F5F3EE' }}>Payment Calendar</h1>
-              <p className="text-sm mt-1" style={{ color: '#6B6865' }}>Monthly debt payment schedule from the Debt Schedule</p>
+              <p className="text-sm mt-1" style={{ color: '#6B6865' }}>Monthly debt payment schedule — actual dates from amortization data</p>
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -319,6 +464,13 @@ export default function DebtCalendar({ tabId }: DebtCalendarProps) {
                 <span className="text-xs font-medium" style={{ color: '#F5F3EE' }}>{paymentDays}</span>
                 <span className="text-xs" style={{ color: '#6B6865' }}>payment days</span>
               </div>
+              {csvCount > 0 && (
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg" style={{ background: 'rgba(74,222,128,0.06)', border: '1px solid rgba(74,222,128,0.15)' }}>
+                  <FileText className="w-3.5 h-3.5" style={{ color: '#4ADE80' }} />
+                  <span className="text-xs font-medium" style={{ color: '#4ADE80' }}>{csvCount}</span>
+                  <span className="text-xs" style={{ color: '#4ADE80' }}>from schedule</span>
+                </div>
+              )}
               {autoCount > 0 && (
                 <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg" style={{ background: '#141210', border: '1px solid #2C2A27' }}>
                   <span className="w-2 h-2 rounded-full" style={{ background: '#4ADE80' }} />
