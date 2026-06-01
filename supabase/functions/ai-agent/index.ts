@@ -527,6 +527,95 @@ async function fetchAccountingData(supabaseUrl: string, serviceKey: string): Pro
   return sections.length > 0 ? sections.join("\n\n") : "";
 }
 
+// ── Manager review helpers ─────────────────────────────────────────────────────
+
+interface TeamMemberRow {
+  id: string;
+  full_name: string;
+  supervisor_id: string | null;
+  start_date: string | null;
+}
+
+function nextAnniversary(startDate: string): string {
+  const today = new Date();
+  const start = new Date(startDate + "T00:00:00");
+  const thisYear = new Date(today.getFullYear(), start.getMonth(), start.getDate());
+  const next = thisYear <= today
+    ? new Date(today.getFullYear() + 1, start.getMonth(), start.getDate())
+    : thisYear;
+  return next.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+}
+
+function daysUntil(startDate: string): number {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const start = new Date(startDate + "T00:00:00");
+  const thisYear = new Date(today.getFullYear(), start.getMonth(), start.getDate());
+  const next = thisYear <= today
+    ? new Date(today.getFullYear() + 1, start.getMonth(), start.getDate())
+    : thisYear;
+  return Math.round((next.getTime() - today.getTime()) / 86400000);
+}
+
+async function fetchManagerReviewContext(
+  supabaseUrl: string,
+  serviceKey: string,
+  memberFullName: string
+): Promise<string> {
+  if (!memberFullName) return "";
+
+  const db = createClient(supabaseUrl, serviceKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+
+  const { data: allMembers } = await db
+    .from("team_members")
+    .select("id, full_name, supervisor_id, start_date")
+    .order("full_name");
+
+  if (!allMembers || allMembers.length === 0) return "";
+
+  const members = allMembers as TeamMemberRow[];
+  const me = members.find(m => m.full_name.toLowerCase() === memberFullName.toLowerCase());
+  if (!me) return "";
+
+  // Who I supervise
+  const directs = members.filter(m => m.supervisor_id === me.id && m.start_date);
+
+  // Who my supervisor is
+  const myBoss = me.supervisor_id ? members.find(m => m.id === me.supervisor_id) : null;
+
+  if (directs.length === 0 && !me.start_date) return "";
+
+  let context = "## Manager Review Schedule\n";
+  context += "Annual reviews occur on each employee's start date anniversary.\n\n";
+
+  if (directs.length > 0) {
+    // Sort by days until next review ascending
+    const sorted = directs
+      .filter(d => d.start_date)
+      .sort((a, b) => daysUntil(a.start_date!) - daysUntil(b.start_date!));
+
+    context += `### Reviews ${memberFullName.split(" ")[0]} Conducts (Direct Reports)\n`;
+    for (const d of sorted) {
+      const days = daysUntil(d.start_date!);
+      const dateStr = nextAnniversary(d.start_date!);
+      const urgency = days <= 30 ? ` *** UPCOMING IN ${days} DAYS ***` : ` (in ${days} days)`;
+      context += `- ${d.full_name}: ${dateStr}${urgency}\n`;
+    }
+  }
+
+  if (myBoss && me.start_date) {
+    const days = daysUntil(me.start_date);
+    const dateStr = nextAnniversary(me.start_date);
+    context += `\n### ${memberFullName.split(" ")[0]}'s Own Review\n`;
+    context += `- Reviewed by: ${myBoss.full_name}\n`;
+    context += `- Date: ${dateStr} (in ${days} days)\n`;
+  }
+
+  return context;
+}
+
 // ── Main handler ──────────────────────────────────────────────────────────────
 
 Deno.serve(async (req: Request) => {
@@ -554,9 +643,10 @@ Deno.serve(async (req: Request) => {
     const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
-    const [docs, accountingData] = await Promise.all([
+    const [docs, accountingData, reviewContext] = await Promise.all([
       fetchPortalDocuments(execAccess, hasAccountingAccess),
       hasAccountingAccess ? fetchAccountingData(supabaseUrl, serviceKey) : Promise.resolve(""),
+      fetchManagerReviewContext(supabaseUrl, serviceKey, member.full_name ?? ""),
     ]);
 
     // Build system prompt
@@ -591,6 +681,10 @@ Be the absolute best assistant this person has ever used. Know their job, antici
 
     if (accountingData) {
       systemContent += `\n\n## ACCOUNTING PROJECTS DATA\nThe following is live data from the Accounting Projects folder. Use it to answer questions about balances, aging, customers, and financial status.\n\n${accountingData}`;
+    }
+
+    if (reviewContext) {
+      systemContent += `\n\n${reviewContext}`;
     }
 
     if (formContext) {
