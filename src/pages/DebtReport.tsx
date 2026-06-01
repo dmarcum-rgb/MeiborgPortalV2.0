@@ -961,7 +961,7 @@ export default function DebtReport({ tabId, uploaderName }: DebtReportProps) {
 
   const csvSchedules = useMemo(() => parseCsvSchedules(compiledCsv), []);
 
-  const canEdit = uploaderName.trim() !== '' && !locked;
+  const canEdit = !locked;
 
   const loadLoans = useCallback(async () => {
     setLoading(true);
