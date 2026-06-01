@@ -46,6 +46,7 @@ interface LoggedInMember {
   avatar_url: string | null;
   position: string | null;
   department: string | null;
+  org_level: number | null;
 }
 
 type SidebarItem =
@@ -121,7 +122,7 @@ function LockScreen({ onSuccess }: { onSuccess: () => void }) {
     setLoading(true);
     const { data } = await supabase
       .from('team_members')
-      .select('full_name, avatar_url, position, departments(name)')
+      .select('full_name, avatar_url, position, org_level, departments(name)')
       .ilike('full_name', name.trim())
       .maybeSingle();
     setLoading(false);
@@ -136,6 +137,7 @@ function LockScreen({ onSuccess }: { onSuccess: () => void }) {
       avatar_url: data.avatar_url,
       position: (data.position as string) || null,
       department: (data.departments as { name: string } | null)?.name || null,
+      org_level: (data.org_level as number) || null,
     };
     sessionStorage.setItem(SESSION_KEY, '1');
     sessionStorage.setItem(MEMBER_KEY, JSON.stringify(member));
@@ -1800,6 +1802,7 @@ interface DeptTabFile {
 
 function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; onSignOut: () => void }) {
   const dept = member?.department ?? '';
+  const canUseMeiGuy = (member?.org_level ?? 99) <= 3;
   const suggestions = getSuggestions(member);
   const firstName = member?.full_name?.split(' ')[0] ?? '';
   const roleSubtitle = member?.position ? `${member.position}${dept ? ` · ${dept}` : ''}` : 'Meiborg Employee';
@@ -2072,6 +2075,7 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
             </div>
 
             {/* Floating MeiGuy button */}
+            {canUseMeiGuy && (
             <button
               onClick={() => setChatOpen(o => !o)}
               className="absolute bottom-6 right-6 w-12 h-12 rounded-2xl overflow-hidden shadow-2xl transition-transform z-40"
@@ -2080,9 +2084,10 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
               onMouseLeave={e => (e.currentTarget.style.transform = chatOpen ? 'scale(0.92)' : 'scale(1)')}>
               <img src="/Mei-Guy_icon_(1).png" alt="MeiGuy" className="w-full h-full object-contain" style={{ background: '#1A1917' }} />
             </button>
+            )}
 
             {/* Floating chat panel */}
-            {chatOpen && (
+            {canUseMeiGuy && chatOpen && (
               <div
                 className="absolute bottom-24 right-6 w-96 flex flex-col rounded-2xl overflow-hidden shadow-2xl z-40"
                 style={{ height: '480px', background: '#141412', border: '1px solid #2C2A27' }}>
@@ -2340,6 +2345,27 @@ export default function PortalPage({
     return <DeptPortalView member={member} onSignOut={handleSignOut} />;
   }
 
-  // Everyone else gets MeiGuy full chat
+  // Level 3 and above get MeiGuy full chat; lower levels see an access notice
+  const orgLevel = member?.org_level ?? 99;
+  if (orgLevel > 3) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen gap-4" style={{ background: '#0F0E0C' }}>
+        <div className="w-14 h-14 rounded-2xl overflow-hidden" style={{ border: '1px solid #2C2A27' }}>
+          <img src="/Mei-Guy_icon_(1).png" alt="MeiGuy" className="w-full h-full object-contain" style={{ background: '#1A1917' }} />
+        </div>
+        <div className="text-center max-w-xs">
+          <p className="text-base font-semibold" style={{ color: '#F5F3EE' }}>MeiGuy is not available</p>
+          <p className="text-sm mt-1" style={{ color: '#6B6865' }}>Access to MeiGuy is limited to level 3 and above.</p>
+        </div>
+        <button
+          onClick={handleSignOut}
+          className="mt-2 px-4 py-2 rounded-lg text-sm"
+          style={{ background: '#1A1917', border: '1px solid #2C2A27', color: '#9A9690' }}>
+          Sign out
+        </button>
+      </div>
+    );
+  }
+
   return <MeiGuyFullChat member={member} onSignOut={handleSignOut} />;
 }
