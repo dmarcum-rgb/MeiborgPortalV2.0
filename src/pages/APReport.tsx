@@ -68,8 +68,17 @@ function agingColor(key: string): string {
 
 // ── CSV Parser ─────────────────────────────────────────────────────────────
 // Parses the Meiborg "Aged Accounts Payable Report" CSV format.
-// Dynamically detects column positions from the header row so it handles
-// layout changes between report versions.
+//
+// Confirmed column layout from AP44.csv:
+//   Vendor header row: col0=vendorCode, col4=vendorName (cell1 empty)
+//   Invoice detail row: col1=voucher#, col3=invDate, col6=glDate, col9=dueDate,
+//                       col11=balance, col15=current, col19=over30, col22=over60,
+//                       col25=over90, col28=over120
+//   Invoice sub-row:    col3=invoiceNumber (col1 empty)
+//   Vendor totals row:  col2="Vendor", col3="VENDORCODE  totals:", col7=invoiceCount,
+//                       col11=balance, col15=current, col19=over30, col22=over60,
+//                       col25=over90, col28=over120
+//   Percentage row follows each totals row (contains %)
 
 function parseCsvLine(line: string): string[] {
   const result: string[] = [];
@@ -85,8 +94,26 @@ function parseCsvLine(line: string): string[] {
   return result;
 }
 
-function hasCurrency(row: string[]): boolean {
-  return row.some(c => /^\$?-?[\d,]+\.\d{2}$/.test(c.trim()));
+// Column positions — confirmed from AP44.csv analysis
+const C = {
+  vendorCode: 0,
+  vendorName: 4,
+  voucher: 1,
+  invDate: 3,
+  glDate: 6,
+  dueDate: 9,
+  balance: 11,
+  current: 15,
+  over30: 19,
+  over60: 22,
+  over90: 25,
+  over120: 28,
+  totalsLabel: 3,  // "VENDORCODE  totals:"
+  invoiceCount: 7,
+};
+
+function g(row: string[], idx: number): string {
+  return (row[idx] ?? '').trim();
 }
 
 export function parseAPCsv(text: string): APReportData {
@@ -100,173 +127,70 @@ export function parseAPCsv(text: string): APReportData {
     if (m) { reportDate = m[1]; break; }
   }
 
-  // Find the column header row — look for rows containing "Voucher" and "Balance"
-  let headerRowIdx = -1;
-  let colMap = { voucher: -1, invDate: -1, glDate: -1, dueDate: -1, addrCode: -1, balance: -1, current: -1, over30: -1, over60: -1, over90: -1, over120: -1, invoiceNum: -1 };
-
-  for (let i = 0; i < Math.min(30, parsed.length); i++) {
-    const row = parsed[i];
-    const joined = row.join('|').toLowerCase();
-    if (joined.includes('voucher') && joined.includes('balance')) {
-      headerRowIdx = i;
-      row.forEach((cell, ci) => {
-        const c = cell.toLowerCase().replace(/\s+/g, ' ').trim();
-        if (c.includes('voucher')) colMap.voucher = ci;
-        else if (c.includes('invoice date') || c === 'inv date' || c === 'inv. date') colMap.invDate = ci;
-        else if (c.includes('gl date') || c === 'g/l date') colMap.glDate = ci;
-        else if (c.includes('due date') || c === 'due') colMap.dueDate = ci;
-        else if (c.includes('addr') || c === 'add code' || c === 'address') colMap.addrCode = ci;
-        else if (c === 'balance' || c === 'balance due') colMap.balance = ci;
-        else if (c === 'current') colMap.current = ci;
-        else if (c.includes('over 30') || c === '30+' || c === '30') colMap.over30 = ci;
-        else if (c.includes('over 60') || c === '60+' || c === '60') colMap.over60 = ci;
-        else if (c.includes('over 90') || c === '90+' || c === '90') colMap.over90 = ci;
-        else if (c.includes('over 120') || c === '120+' || c === '120') colMap.over120 = ci;
-        else if (c.includes('invoice') && (c.includes('num') || c.includes('#') || c === 'invoice')) colMap.invoiceNum = ci;
-      });
-      // Also check the next header row if it exists (some reports split column headers across 2 rows)
-      if (i + 1 < parsed.length) {
-        const row2 = parsed[i + 1];
-        const joined2 = row2.join('|').toLowerCase();
-        if (!joined2.includes('voucher') && (joined2.includes('30') || joined2.includes('60') || joined2.includes('90'))) {
-          row2.forEach((cell, ci) => {
-            const c = cell.toLowerCase().replace(/\s+/g, ' ').trim();
-            if (c === '30' || c === 'over 30' || c === '30+') colMap.over30 = ci;
-            else if (c === '60' || c === 'over 60' || c === '60+') colMap.over60 = ci;
-            else if (c === '90' || c === 'over 90' || c === '90+') colMap.over90 = ci;
-            else if (c === '120' || c === 'over 120' || c === '120+') colMap.over120 = ci;
-            else if ((c === 'current') && colMap.current < 0) colMap.current = ci;
-            else if ((c === 'balance' || c === 'balance due') && colMap.balance < 0) colMap.balance = ci;
-          });
-        }
-      }
-      break;
-    }
-  }
-
-  // Fallback: if no header found, infer columns from structure of first data rows
-  // Typical AP CSV: col0=empty|code, col1=vendor name|voucher, col2=inv date, col3=gl date,
-  // col4=due date, col5=addr, col6=balance, col7=current, col8=30, col9=60, col10=90, col11=120
-  if (headerRowIdx < 0 || colMap.balance < 0) {
-    // Find first row with currency values to infer balance column
-    for (let i = 5; i < Math.min(50, parsed.length); i++) {
-      const row = parsed[i];
-      if (!hasCurrency(row)) continue;
-      // Find the first currency column — that's likely "balance"
-      const balIdx = row.findIndex(c => /^\$?-?[\d,]+\.\d{2}$/.test(c.trim()));
-      if (balIdx >= 0) {
-        // Use a sliding window: balance is first $, then current, over30, over60, over90, over120
-        colMap.balance = balIdx;
-        colMap.current = balIdx + 1;
-        colMap.over30 = balIdx + 2;
-        colMap.over60 = balIdx + 3;
-        colMap.over90 = balIdx + 4;
-        colMap.over120 = balIdx + 5;
-        // voucher is typically 1 column before or 2 cols before balance
-        colMap.voucher = Math.max(0, balIdx - 4);
-        colMap.invDate = Math.max(0, balIdx - 3);
-        colMap.glDate = Math.max(0, balIdx - 2);
-        colMap.dueDate = Math.max(0, balIdx - 1);
-        break;
-      }
-    }
-  }
-
-  function getCol(row: string[], idx: number): string {
-    return idx >= 0 ? (row[idx] ?? '') : '';
-  }
-
   const vendors: APVendor[] = [];
   let currentVendor: APVendor | null = null;
-  let i = headerRowIdx >= 0 ? headerRowIdx + 1 : 0;
-  // Skip an additional sub-header row if it exists
-  if (i < parsed.length) {
-    const r = parsed[i];
-    const j = r.join('|').toLowerCase();
-    if (j.includes('30') && j.includes('60') && !hasCurrency(r)) i++;
+
+  // Skip to after first separator line
+  let i = 0;
+  while (i < parsed.length && !g(parsed[i], 0).startsWith('____')) i++;
+  i++; // skip separator itself
+
+  // Skip column header rows and next separator (rows 6, 7, 8 in the file)
+  while (i < parsed.length) {
+    const row = parsed[i];
+    const cell0 = g(row, 0);
+    const rowText = row.join('|');
+    if (cell0.startsWith('____')) { i++; break; } // second separator = end of headers
+    if (rowText.toLowerCase().includes('voucher') || rowText.toLowerCase().includes('invoice #')) { i++; continue; }
+    i++;
   }
 
   while (i < parsed.length) {
     const row = parsed[i];
-    const cell0 = (row[0] ?? '').trim();
-    const cell1 = (row[1] ?? '').trim();
-    const allEmpty = row.every(c => !c.trim());
+    const cell0 = g(row, 0);
+    const cell1 = g(row, 1);
+    const cell2 = g(row, 2);
+    const cell3 = g(row, 3);
 
-    // Empty row
-    if (allEmpty) { i++; continue; }
+    // Skip empty rows
+    if (row.every(c => !c.trim())) { i++; continue; }
 
-    // Separator line (____...)
-    if (cell0.startsWith('____') || cell1.startsWith('____')) { i++; continue; }
+    // Skip separator lines
+    if (cell0.startsWith('____')) { i++; continue; }
 
-    // Report footer lines
+    // Report totals / footer — stop
     if (/^(Report totals|Number of (vendors|invoices)|Average invoice|Net Accounts)/i.test(cell0) ||
-        /^(Report totals|Number of (vendors|invoices)|Average invoice|Net Accounts)/i.test(cell1)) break;
+        /^(Report totals|Number of (vendors|invoices)|Average invoice|Net Accounts)/i.test(cell3)) break;
 
-    // Column header row repetition
-    const rowJoined = row.join('|').toLowerCase();
-    if (rowJoined.includes('voucher') && rowJoined.includes('balance')) { i++; continue; }
+    // Percentage row — skip
+    if (row.some(c => c.includes('%'))) { i++; continue; }
 
-    // Vendor totals row — many forms: "Vendor X totals:" / "VENDORCODE totals:" in cell0 or cell1
-    const totalsMatch = cell0.match(/^vendor\s+\S+\s+totals:/i) ||
-                        cell1.match(/^vendor\s+\S+\s+totals:/i) ||
-                        cell0.match(/^\S+\s+totals:/i) ||
-                        cell1.match(/^\S+\s+totals:/i);
-    if (totalsMatch) {
+    // Vendor totals row: col2="Vendor" and col3 ends with "totals:"
+    if (cell2 === 'Vendor' && cell3.toLowerCase().endsWith('totals:')) {
       if (currentVendor) {
-        // Totals values are in the currency columns of this same row
-        // Try both cell0-row and cell1-row as the totals-bearing row
-        const invoiceCount = (() => {
-          for (const c of row) { const n = parseInt(c); if (!isNaN(n) && n > 0 && !/[$.]/.test(c)) return n; }
-          return currentVendor.invoices.length;
-        })();
+        const invoiceCount = parseInt(g(row, C.invoiceCount)) || currentVendor.invoices.length;
         currentVendor.totals = {
-          balance: parseNum(getCol(row, colMap.balance)),
-          current: parseNum(getCol(row, colMap.current)),
-          over30: parseNum(getCol(row, colMap.over30)),
-          over60: parseNum(getCol(row, colMap.over60)),
-          over90: parseNum(getCol(row, colMap.over90)),
-          over120: parseNum(getCol(row, colMap.over120)),
+          balance: parseNum(g(row, C.balance)),
+          current: parseNum(g(row, C.current)),
+          over30: parseNum(g(row, C.over30)),
+          over60: parseNum(g(row, C.over60)),
+          over90: parseNum(g(row, C.over90)),
+          over120: parseNum(g(row, C.over120)),
           invoiceCount,
         };
-        // If totals are all 0 but invoices have data, sum from invoices
-        if (currentVendor.totals.balance === 0 && currentVendor.invoices.length > 0) {
-          currentVendor.totals = {
-            balance: currentVendor.invoices.reduce((s, v) => s + v.balance, 0),
-            current: currentVendor.invoices.reduce((s, v) => s + v.current, 0),
-            over30: currentVendor.invoices.reduce((s, v) => s + v.over30, 0),
-            over60: currentVendor.invoices.reduce((s, v) => s + v.over60, 0),
-            over90: currentVendor.invoices.reduce((s, v) => s + v.over90, 0),
-            over120: currentVendor.invoices.reduce((s, v) => s + v.over120, 0),
-            invoiceCount: currentVendor.invoices.length,
-          };
-        }
         vendors.push(currentVendor);
       }
       currentVendor = null;
       i++;
-      // Skip percentage row immediately after totals
-      if (i < parsed.length && parsed[i].some(c => c.includes('%'))) i++;
       continue;
     }
 
-    // Vendor header row detection:
-    // Pattern A: cell0 = vendorCode (short, no spaces, no $), cell1 = vendor name (has spaces or is non-numeric)
-    // Pattern B: cell0 = vendorCode, cells 2..balanceCol-1 empty, name somewhere later
-    const looksLikeVendorHeader =
-      cell0 &&
-      !cell0.includes('_') &&
-      !hasCurrency(row) &&
-      !cell0.match(/^\d{5,}$/) && // not a pure voucher number
-      cell1 && !cell1.match(/^\d+$/) && // cell1 is not a pure number (not voucher)
-      !cell1.match(/^vendor\s/i) &&
-      row.slice(colMap.balance >= 0 ? colMap.balance : 6).every(c => !c.trim()); // no $ after balance col
-
-    if (looksLikeVendorHeader) {
-      // Find vendor name: first non-empty cell after code that looks like a name
-      const vendorName = cell1 || row.slice(2).find(c => c.trim() && !c.match(/^\d+$/)) || cell0;
+    // Vendor header row: col0 has vendor code, col1 empty, col4 has vendor name
+    if (cell0 && !cell1 && !cell0.startsWith('____')) {
+      const vendorName = g(row, C.vendorName) || cell0;
       currentVendor = {
         code: cell0,
-        name: vendorName.trim() || cell0,
+        name: vendorName,
         invoices: [],
         totals: { balance: 0, current: 0, over30: 0, over60: 0, over90: 0, over120: 0, invoiceCount: 0 },
       };
@@ -274,63 +198,55 @@ export function parseAPCsv(text: string): APReportData {
       continue;
     }
 
-    // Invoice detail row: has currency values AND voucher-column has a number
-    if (currentVendor && hasCurrency(row)) {
-      const voucherRaw = colMap.voucher >= 0 ? getCol(row, colMap.voucher) : '';
-      const voucherNum = voucherRaw.match(/^\d+$/) ? voucherRaw : row.find(c => /^\d{4,}$/.test(c.trim())) ?? '';
-      const invoiceDate = getCol(row, colMap.invDate);
-      const glDate = getCol(row, colMap.glDate);
-      const dueDate = getCol(row, colMap.dueDate);
-      const addrCode = getCol(row, colMap.addrCode);
-      const balance = parseNum(getCol(row, colMap.balance));
-      const current = parseNum(getCol(row, colMap.current));
-      const over30 = parseNum(getCol(row, colMap.over30));
-      const over60 = parseNum(getCol(row, colMap.over60));
-      const over90 = parseNum(getCol(row, colMap.over90));
-      const over120 = parseNum(getCol(row, colMap.over120));
+    // Invoice detail row: col1 has voucher number (numeric), col11 has balance ($)
+    if (currentVendor && cell1 && /^\d+$/.test(cell1) && g(row, C.balance).startsWith('$')) {
+      const voucherNum = cell1;
+      const invoiceDate = g(row, C.invDate);
+      const glDate = g(row, C.glDate);
+      const dueDate = g(row, C.dueDate);
+      const balance = parseNum(g(row, C.balance));
+      const current = parseNum(g(row, C.current));
+      const over30 = parseNum(g(row, C.over30));
+      const over60 = parseNum(g(row, C.over60));
+      const over90 = parseNum(g(row, C.over90));
+      const over120 = parseNum(g(row, C.over120));
 
-      // Invoice number may be inline (invoiceNum col) or on the next row
-      let invoiceNum = colMap.invoiceNum >= 0 ? getCol(row, colMap.invoiceNum) : '';
-      let skip = 1;
-      if (!invoiceNum && i + 1 < parsed.length) {
-        const nextRow = parsed[i + 1];
-        const nextHasCurrency = hasCurrency(nextRow);
-        const nextIsVendor = nextRow[0]?.trim() && !nextRow[0].trim().match(/^\d+$/) && !nextHasCurrency;
-        const nextIsTotals = (nextRow[0] ?? '').match(/totals:/i) || (nextRow[1] ?? '').match(/totals:/i);
-        if (!nextHasCurrency && !nextIsVendor && !nextIsTotals) {
-          // Next row is a sub-row — grab invoice number from it
-          invoiceNum = nextRow.find(c => c.trim() && !c.match(/^\d{5,}$/) && !/^[\d,]+\.\d{2}$/.test(c)) ?? '';
-          skip = 2;
+      // Invoice number is on the next sub-row at col3 (col1 is empty on sub-rows)
+      let invoiceNum = '';
+      if (i + 1 < parsed.length) {
+        const next = parsed[i + 1];
+        if (!g(next, 1) && g(next, C.invDate)) {
+          invoiceNum = g(next, C.invDate);
+          i += 2;
+        } else {
+          i++;
         }
+      } else {
+        i++;
       }
 
-      if (voucherNum || balance !== 0) {
-        currentVendor.invoices.push({
-          voucherNum, invoiceNum, invoiceDate, glDate, dueDate, addrCode,
-          poNumber: '',
-          balance, current, over30, over60, over90, over120,
-        });
-      }
-      i += skip;
+      currentVendor.invoices.push({
+        voucherNum, invoiceNum, invoiceDate, glDate, dueDate, addrCode: '',
+        poNumber: '',
+        balance, current, over30, over60, over90, over120,
+      });
       continue;
     }
 
     i++;
   }
 
-  // Push last vendor if totals row was missing
-  if (currentVendor) {
-    if (currentVendor.invoices.length > 0) {
-      currentVendor.totals = {
-        balance: currentVendor.invoices.reduce((s, v) => s + v.balance, 0),
-        current: currentVendor.invoices.reduce((s, v) => s + v.current, 0),
-        over30: currentVendor.invoices.reduce((s, v) => s + v.over30, 0),
-        over60: currentVendor.invoices.reduce((s, v) => s + v.over60, 0),
-        over90: currentVendor.invoices.reduce((s, v) => s + v.over90, 0),
-        over120: currentVendor.invoices.reduce((s, v) => s + v.over120, 0),
-        invoiceCount: currentVendor.invoices.length,
-      };
-    }
+  // Flush last vendor if file ended without a totals row
+  if (currentVendor && currentVendor.invoices.length > 0) {
+    currentVendor.totals = {
+      balance: currentVendor.invoices.reduce((s, v) => s + v.balance, 0),
+      current: currentVendor.invoices.reduce((s, v) => s + v.current, 0),
+      over30: currentVendor.invoices.reduce((s, v) => s + v.over30, 0),
+      over60: currentVendor.invoices.reduce((s, v) => s + v.over60, 0),
+      over90: currentVendor.invoices.reduce((s, v) => s + v.over90, 0),
+      over120: currentVendor.invoices.reduce((s, v) => s + v.over120, 0),
+      invoiceCount: currentVendor.invoices.length,
+    };
     vendors.push(currentVendor);
   }
 
