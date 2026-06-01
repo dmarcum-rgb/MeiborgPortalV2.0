@@ -628,7 +628,7 @@ Be the absolute best assistant this person has ever used. Know their job, antici
           role: "user",
           content: [
             ...pdfBlocks,
-            { type: "text", content: typeof lastMsg.content === "string" ? lastMsg.content : JSON.stringify(lastMsg.content) },
+            { type: "text", text: typeof lastMsg.content === "string" ? lastMsg.content : JSON.stringify(lastMsg.content) },
           ],
         };
       }
