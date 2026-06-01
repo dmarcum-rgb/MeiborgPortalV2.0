@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Building2, ChevronDown, ChevronRight, Plus, Edit2, Trash2,
   Lock, Unlock, TrendingDown, DollarSign, Calendar, Percent,
-  X, Check, AlertTriangle, Search, TableProperties, FileText
+  X, Check, AlertTriangle, Search, TableProperties, FileText, RefreshCw
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import compiledCsv from '../assets/Compiled_Amortization_Schedules.csv?raw';
@@ -384,10 +384,236 @@ function buildFallbackSchedule(loan: DebtLoan): AmortRow[] {
   return rows;
 }
 
+interface DateOverride {
+  id: string;
+  payment_number: number;
+  override_date: string; // ISO yyyy-mm-dd
+  recurring: boolean;
+}
+
+/** Apply overrides to a schedule. Recurring overrides shift the day-of-month
+ *  for that payment and all subsequent ones. One-off overrides only move
+ *  the specific payment row. */
+function applyOverrides(schedule: AmortRow[], overrides: DateOverride[]): AmortRow[] {
+  if (overrides.length === 0) return schedule;
+
+  const result = schedule.map(r => ({ ...r }));
+
+  // Sort overrides by payment_number ascending so we apply them in order
+  const sorted = [...overrides].sort((a, b) => a.payment_number - b.payment_number);
+
+  for (const ov of sorted) {
+    const idx = result.findIndex(r => r.n === ov.payment_number);
+    if (idx === -1) continue;
+
+    const newDate = new Date(ov.override_date + 'T12:00:00');
+
+    if (ov.recurring) {
+      // Compute day-of-month from the override date
+      const newDay = newDate.getDate();
+      for (let i = idx; i < result.length; i++) {
+        const orig = result[i].rawDate;
+        if (orig) {
+          const shifted = new Date(orig.getFullYear(), orig.getMonth(), newDay);
+          result[i] = {
+            ...result[i],
+            rawDate: shifted,
+            date: shifted.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+          };
+        }
+      }
+    } else {
+      result[idx] = {
+        ...result[idx],
+        rawDate: newDate,
+        date: newDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      };
+    }
+  }
+
+  return result;
+}
+
+// ── Date edit dialog ──────────────────────────────────────────────────────
+
+function DateEditDialog({ row, loan, existing, onSave, onCancel }: {
+  row: AmortRow;
+  loan: DebtLoan;
+  existing: DateOverride | undefined;
+  onSave: (override: { payment_number: number; override_date: string; recurring: boolean }) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const initialDate = existing?.override_date
+    ?? (row.rawDate ? row.rawDate.toISOString().slice(0, 10) : '');
+  const [dateVal, setDateVal] = useState(initialDate);
+  const [step, setStep] = useState<'pick' | 'recurring'>('pick');
+  const [saving, setSaving] = useState(false);
+
+  async function handleRecurring(recurring: boolean) {
+    setSaving(true);
+    await onSave({ payment_number: row.n, override_date: dateVal, recurring });
+    setSaving(false);
+  }
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.6)' }}>
+      <div className="w-full max-w-sm rounded-2xl overflow-hidden" style={{ background: '#141210', border: '1px solid #2C2A27' }}>
+        {step === 'pick' ? (
+          <>
+            <div className="px-5 py-4" style={{ borderBottom: '1px solid #2C2A27' }}>
+              <div className="text-sm font-semibold" style={{ color: '#F5F3EE' }}>
+                Edit Payment Date — #{row.n}
+              </div>
+              <div className="text-xs mt-0.5" style={{ color: '#6B6865' }}>
+                {loan.lender} · {loan.description}
+              </div>
+            </div>
+            <div className="p-5">
+              <label className="text-xs font-medium block mb-1.5" style={{ color: '#9A9690' }}>Payment Date</label>
+              <input
+                type="date"
+                value={dateVal}
+                onChange={e => setDateVal(e.target.value)}
+                className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                style={{ background: '#1A1917', border: '1px solid #2C2A27', color: '#F5F3EE' }}
+              />
+            </div>
+            <div className="px-5 pb-5 flex gap-2">
+              <button
+                onClick={onCancel}
+                className="flex-1 py-2 rounded-lg text-sm transition-colors hover:bg-white/5"
+                style={{ border: '1px solid #2C2A27', color: '#9A9690' }}
+              >
+                Cancel
+              </button>
+              <button
+                disabled={!dateVal}
+                onClick={() => setStep('recurring')}
+                className="flex-1 py-2 rounded-lg text-sm font-medium transition-colors"
+                style={{ background: dateVal ? '#C8A96E' : '#2C2A27', color: dateVal ? '#0F0E0C' : '#4A4844' }}
+              >
+                Next
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="px-5 py-4" style={{ borderBottom: '1px solid #2C2A27' }}>
+              <div className="text-sm font-semibold" style={{ color: '#F5F3EE' }}>Apply to future payments?</div>
+              <div className="text-xs mt-0.5" style={{ color: '#6B6865' }}>
+                New date: {new Date(dateVal + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+              </div>
+            </div>
+            <div className="p-5 space-y-3">
+              <button
+                disabled={saving}
+                onClick={() => handleRecurring(true)}
+                className="w-full flex items-start gap-3 p-4 rounded-xl text-left transition-colors hover:bg-white/5"
+                style={{ border: '1px solid #2C2A27', background: '#1A1917' }}
+              >
+                <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5" style={{ background: 'rgba(200,169,110,0.12)' }}>
+                  <RefreshCw className="w-4 h-4" style={{ color: '#C8A96E' }} />
+                </div>
+                <div>
+                  <div className="text-sm font-medium" style={{ color: '#F5F3EE' }}>Recurring</div>
+                  <div className="text-xs mt-0.5 leading-snug" style={{ color: '#6B6865' }}>
+                    Shift payment #{row.n} and all future payments to the {new Date(dateVal + 'T12:00:00').getDate()}{ordinal(new Date(dateVal + 'T12:00:00').getDate())} of each month
+                  </div>
+                </div>
+              </button>
+              <button
+                disabled={saving}
+                onClick={() => handleRecurring(false)}
+                className="w-full flex items-start gap-3 p-4 rounded-xl text-left transition-colors hover:bg-white/5"
+                style={{ border: '1px solid #2C2A27', background: '#1A1917' }}
+              >
+                <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5" style={{ background: 'rgba(168,197,218,0.1)' }}>
+                  <Calendar className="w-4 h-4" style={{ color: '#A8C5DA' }} />
+                </div>
+                <div>
+                  <div className="text-sm font-medium" style={{ color: '#F5F3EE' }}>This payment only</div>
+                  <div className="text-xs mt-0.5" style={{ color: '#6B6865' }}>Only move payment #{row.n}</div>
+                </div>
+              </button>
+            </div>
+            <div className="px-5 pb-5">
+              <button
+                onClick={() => setStep('pick')}
+                className="w-full py-2 rounded-lg text-sm transition-colors hover:bg-white/5"
+                style={{ border: '1px solid #2C2A27', color: '#9A9690' }}
+              >
+                Back
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ordinal(n: number): string {
+  if (n >= 11 && n <= 13) return 'th';
+  switch (n % 10) {
+    case 1: return 'st';
+    case 2: return 'nd';
+    case 3: return 'rd';
+    default: return 'th';
+  }
+}
+
 function AmortModal({ loan, onClose, csvSchedules }: { loan: DebtLoan; onClose: () => void; csvSchedules: Map<string, AmortRow[]> }) {
   const csvRows = csvSchedules.get(loan.loan_number) ?? [];
   const hasCsv = csvRows.length > 0;
-  const schedule = hasCsv ? csvRows : buildFallbackSchedule(loan);
+  const baseSchedule = hasCsv ? csvRows : buildFallbackSchedule(loan);
+
+  const [overrides, setOverrides] = useState<DateOverride[]>([]);
+  const [editingRow, setEditingRow] = useState<AmortRow | null>(null);
+  const [loadingOverrides, setLoadingOverrides] = useState(true);
+
+  useEffect(() => {
+    async function load() {
+      const { data } = await supabase
+        .from('loan_payment_date_overrides')
+        .select('id, payment_number, override_date, recurring')
+        .eq('loan_id', loan.id)
+        .order('payment_number');
+      setOverrides((data ?? []) as DateOverride[]);
+      setLoadingOverrides(false);
+    }
+    load();
+  }, [loan.id]);
+
+  const schedule = useMemo(
+    () => applyOverrides(baseSchedule, overrides),
+    [baseSchedule, overrides]
+  );
+
+  async function handleSaveOverride({ payment_number, override_date, recurring }: {
+    payment_number: number; override_date: string; recurring: boolean;
+  }) {
+    const existing = overrides.find(o => o.payment_number === payment_number);
+
+    if (existing) {
+      await supabase
+        .from('loan_payment_date_overrides')
+        .update({ override_date, recurring, updated_at: new Date().toISOString() })
+        .eq('id', existing.id);
+    } else {
+      await supabase
+        .from('loan_payment_date_overrides')
+        .insert({ loan_id: loan.id, loan_number: loan.loan_number, payment_number, override_date, recurring });
+    }
+
+    // Reload overrides
+    const { data } = await supabase
+      .from('loan_payment_date_overrides')
+      .select('id, payment_number, override_date, recurring')
+      .eq('loan_id', loan.id)
+      .order('payment_number');
+    setOverrides((data ?? []) as DateOverride[]);
+    setEditingRow(null);
+  }
 
   const totalInterest = schedule.reduce((s, r) => s + (r.interest ?? 0), 0);
   const totalPrincipal = schedule.reduce((s, r) => s + (r.principal ?? 0), 0);
@@ -396,7 +622,6 @@ function AmortModal({ loan, onClose, csvSchedules }: { loan: DebtLoan; onClose: 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  // Find the current/next payment row (first row with rawDate >= today that has actual payment data)
   const todayIdx = schedule.findIndex(r => {
     if (!r.rawDate) return false;
     const d = new Date(r.rawDate);
@@ -404,11 +629,11 @@ function AmortModal({ loan, onClose, csvSchedules }: { loan: DebtLoan; onClose: 
     return d >= today && r.payment !== null;
   });
 
-  // Current balance from the row just before todayIdx (ending balance), or loan.balance
   const currentBalanceRow = todayIdx > 0 ? schedule[todayIdx - 1].ending : null;
   const displayBalance = currentBalanceRow !== null ? currentBalanceRow : loan.balance;
 
   return (
+    <>
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.75)' }}>
       <div className="w-full max-w-5xl rounded-2xl flex flex-col overflow-hidden" style={{ background: '#0F0E0C', border: '1px solid #2C2A27', maxHeight: '90vh' }}>
         {/* Header */}
@@ -428,9 +653,16 @@ function AmortModal({ loan, onClose, csvSchedules }: { loan: DebtLoan; onClose: 
                   Calculated
                 </span>
               )}
+              {overrides.length > 0 && (
+                <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium" style={{ background: 'rgba(168,197,218,0.1)', color: '#A8C5DA' }}>
+                  <Calendar className="w-3 h-3" />
+                  {overrides.length} date override{overrides.length !== 1 ? 's' : ''}
+                </span>
+              )}
             </div>
             <p className="text-xs mt-0.5" style={{ color: '#6B6865' }}>
               {loan.description}{loan.entity ? ` · ${loan.entity}` : ''} · {fmtRate(loan.interest_rate)} · {fmtFull(loan.monthly_payment)}/mo
+              {!loadingOverrides && <span style={{ color: '#4A4844' }}> · Click any date to edit</span>}
             </p>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-lg transition-colors hover:bg-white/5 flex-shrink-0 ml-4">
@@ -470,23 +702,40 @@ function AmortModal({ loan, onClose, csvSchedules }: { loan: DebtLoan; onClose: 
               </thead>
               <tbody>
                 {schedule.map((row, i) => {
-                  const isToday = i === todayIdx;
+                  const isCurrentPayment = i === todayIdx;
                   const isFinal = i === schedule.length - 1;
                   const hasData = row.payment !== null || row.principal !== null;
+                  const hasOverride = overrides.some(o => o.payment_number === row.n);
+                  const recurringOverride = overrides.find(o => o.payment_number === row.n && o.recurring);
                   return (
                     <tr
                       key={row.n}
                       style={{
                         borderBottom: '1px solid #1A1917',
-                        background: isToday ? 'rgba(200,169,110,0.07)' : isFinal ? 'rgba(74,222,128,0.05)' : 'transparent',
+                        background: isCurrentPayment ? 'rgba(200,169,110,0.07)' : isFinal ? 'rgba(74,222,128,0.05)' : 'transparent',
                         opacity: hasData ? 1 : 0.4,
                       }}
                     >
-                      <td className="px-4 py-2 font-mono" style={{ color: isToday ? '#C8A96E' : '#4A4844' }}>{row.n}</td>
-                      <td className="px-4 py-2 whitespace-nowrap font-medium" style={{ color: isToday ? '#C8A96E' : isFinal ? '#4ADE80' : '#9A9690' }}>
-                        {row.date}
-                        {isToday && <span className="ml-2 text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(200,169,110,0.15)', color: '#C8A96E' }}>Current</span>}
-                        {isFinal && !isToday && <span className="ml-2 text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(74,222,128,0.12)', color: '#4ADE80' }}>Payoff</span>}
+                      <td className="px-4 py-2 font-mono" style={{ color: isCurrentPayment ? '#C8A96E' : '#4A4844' }}>{row.n}</td>
+                      <td className="px-4 py-2 whitespace-nowrap">
+                        <button
+                          onClick={() => setEditingRow(row)}
+                          className="flex items-center gap-1.5 group transition-colors rounded px-1.5 py-0.5 -mx-1.5"
+                          style={{ color: isCurrentPayment ? '#C8A96E' : hasOverride ? '#A8C5DA' : '#9A9690' }}
+                          title="Click to edit payment date"
+                        >
+                          <span className="font-medium">{row.date}</span>
+                          {hasOverride && (
+                            recurringOverride
+                              ? <RefreshCw className="w-3 h-3 flex-shrink-0" style={{ color: '#A8C5DA' }} />
+                              : <Calendar className="w-3 h-3 flex-shrink-0" style={{ color: '#A8C5DA' }} />
+                          )}
+                          {!hasOverride && (
+                            <Edit2 className="w-3 h-3 flex-shrink-0 opacity-0 group-hover:opacity-40 transition-opacity" />
+                          )}
+                          {isCurrentPayment && <span className="ml-1 text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(200,169,110,0.15)', color: '#C8A96E' }}>Current</span>}
+                          {isFinal && !isCurrentPayment && <span className="ml-1 text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(74,222,128,0.12)', color: '#4ADE80' }}>Payoff</span>}
+                        </button>
                       </td>
                       <td className="px-4 py-2 text-right font-mono" style={{ color: '#C8C4BC' }}>{row.payment !== null ? fmtFull(row.payment) : '—'}</td>
                       <td className="px-4 py-2 text-right font-mono" style={{ color: '#C8C4BC' }}>{row.opening !== null ? fmtFull(row.opening) : '—'}</td>
@@ -504,6 +753,17 @@ function AmortModal({ loan, onClose, csvSchedules }: { loan: DebtLoan; onClose: 
         )}
       </div>
     </div>
+
+    {editingRow && (
+      <DateEditDialog
+        row={editingRow}
+        loan={loan}
+        existing={overrides.find(o => o.payment_number === editingRow.n)}
+        onSave={handleSaveOverride}
+        onCancel={() => setEditingRow(null)}
+      />
+    )}
+    </>
   );
 }
 

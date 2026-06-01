@@ -22,6 +22,13 @@ interface DebtLoan {
   auto_pull: boolean;
 }
 
+interface DateOverride {
+  loan_id: string;
+  payment_number: number;
+  override_date: string; // ISO yyyy-mm-dd
+  recurring: boolean;
+}
+
 interface CsvPaymentRow {
   glNum: string;
   lender: string;
@@ -135,32 +142,58 @@ function parseCsvPayments(csv: string): Map<string, CsvPaymentRow[]> {
 function buildCsvPaymentMap(
   loans: DebtLoan[],
   csvMap: Map<string, CsvPaymentRow[]>,
+  overrides: DateOverride[],
   year: number,
   month: number
 ): Map<number, PaymentEvent[]> {
   const map = new Map<number, PaymentEvent[]>();
 
-  // Build a lookup from loan_number → loan info
   const loanByGl = new Map<string, DebtLoan>();
   for (const loan of loans) {
     if (loan.loan_number) loanByGl.set(loan.loan_number, loan);
+  }
+
+  // Build a lookup: loan_id → sorted overrides for that loan
+  const overridesByLoan = new Map<string, DateOverride[]>();
+  for (const ov of overrides) {
+    if (!overridesByLoan.has(ov.loan_id)) overridesByLoan.set(ov.loan_id, []);
+    overridesByLoan.get(ov.loan_id)!.push(ov);
+  }
+
+  /** Compute the effective date of a CSV row after applying overrides */
+  function effectiveDate(loan: DebtLoan, row: CsvPaymentRow): Date {
+    const loanOverrides = (overridesByLoan.get(loan.id) ?? [])
+      .filter(o => o.payment_number <= row.pmtNum)
+      .sort((a, b) => a.payment_number - b.payment_number);
+
+    let date = new Date(row.date);
+    for (const ov of loanOverrides) {
+      const ovDate = new Date(ov.override_date + 'T12:00:00');
+      if (ov.recurring) {
+        const newDay = ovDate.getDate();
+        date = new Date(date.getFullYear(), date.getMonth(), newDay);
+      } else if (ov.payment_number === row.pmtNum) {
+        date = ovDate;
+      }
+    }
+    return date;
   }
 
   for (const [glNum, rows] of csvMap.entries()) {
     const loan = loanByGl.get(glNum);
     if (!loan) continue;
 
-    // Find all rows for this month/year that have payment data
     for (const row of rows) {
-      if (row.date.getFullYear() !== year || row.date.getMonth() + 1 !== month) continue;
-      // Include rows even if payment is null (scheduled but not yet paid)
-      const day = row.date.getDate();
+      const effDate = effectiveDate(loan, row);
+      if (effDate.getFullYear() !== year || effDate.getMonth() + 1 !== month) continue;
+
+      const day = effDate.getDate();
       if (!map.has(day)) map.set(day, []);
 
-      // Find the last row with data to determine if this is the final payment
       const lastDataRow = [...rows].reverse().find(r => r.ending !== null && r.ending <= 0.01);
-      const isFinal = lastDataRow
-        ? lastDataRow.date.getFullYear() === year && lastDataRow.date.getMonth() + 1 === month
+      const lastEffDate = lastDataRow ? effectiveDate(loan, lastDataRow) : null;
+      const isFinal = lastEffDate
+        ? lastEffDate.getFullYear() === year && lastEffDate.getMonth() + 1 === month
         : false;
 
       map.get(day)!.push({
@@ -182,7 +215,7 @@ function buildCsvPaymentMap(
     }
   }
 
-  // Also add loans not in CSV using origination-date fallback
+  // Fallback for loans not in CSV
   for (const loan of loans) {
     if (loan.loan_number && csvMap.has(loan.loan_number)) continue;
     if (!loan.origination_date) continue;
@@ -200,7 +233,26 @@ function buildCsvPaymentMap(
       if (year > mat.getFullYear() || (year === mat.getFullYear() && month > mat.getMonth() + 1)) continue;
     }
 
-    const day = orig.getDate();
+    // Compute payment number for this month to apply overrides
+    const pmtNum = (year - startYear) * 12 + (month - startMonth) + 1;
+    const loanOverrides = (overridesByLoan.get(loan.id) ?? [])
+      .filter(o => o.payment_number <= pmtNum)
+      .sort((a, b) => a.payment_number - b.payment_number);
+
+    let day = orig.getDate();
+    for (const ov of loanOverrides) {
+      const ovDate = new Date(ov.override_date + 'T12:00:00');
+      if (ov.recurring) {
+        day = ovDate.getDate();
+      } else if (ov.payment_number === pmtNum) {
+        // One-off: only if it lands in this month
+        const ovYear = ovDate.getFullYear();
+        const ovMonth = ovDate.getMonth() + 1;
+        if (ovYear === year && ovMonth === month) day = ovDate.getDate();
+        else continue;
+      }
+    }
+
     if (!map.has(day)) map.set(day, []);
     const isFinal = loan.maturity_date
       ? new Date(loan.maturity_date + 'T12:00:00').getFullYear() === year && new Date(loan.maturity_date + 'T12:00:00').getMonth() + 1 === month
@@ -338,6 +390,7 @@ interface DebtCalendarProps {
 
 export default function DebtCalendar({ tabId }: DebtCalendarProps) {
   const [loans, setLoans] = useState<DebtLoan[]>([]);
+  const [overrides, setOverrides] = useState<DateOverride[]>([]);
   const [loading, setLoading] = useState(true);
 
   const today = new Date();
@@ -362,7 +415,18 @@ export default function DebtCalendar({ tabId }: DebtCalendarProps) {
       .eq('tab_id', debtTab.id)
       .order('lender');
 
-    setLoans((data ?? []) as DebtLoan[]);
+    const loanList = (data ?? []) as DebtLoan[];
+    setLoans(loanList);
+
+    // Load all overrides for these loans
+    if (loanList.length > 0) {
+      const { data: ovData } = await supabase
+        .from('loan_payment_date_overrides')
+        .select('loan_id, payment_number, override_date, recurring')
+        .in('loan_id', loanList.map(l => l.id));
+      setOverrides((ovData ?? []) as DateOverride[]);
+    }
+
     setLoading(false);
   }, [tabId]);
 
@@ -386,8 +450,8 @@ export default function DebtCalendar({ tabId }: DebtCalendarProps) {
   }
 
   const paymentMap = useMemo(
-    () => buildCsvPaymentMap(loans, csvPayments, viewYear, viewMonth),
-    [loans, csvPayments, viewYear, viewMonth]
+    () => buildCsvPaymentMap(loans, csvPayments, overrides, viewYear, viewMonth),
+    [loans, csvPayments, overrides, viewYear, viewMonth]
   );
 
   // Calendar grid
