@@ -62,11 +62,12 @@ Deno.serve(async (req: Request) => {
 
     // ── Update team member ─────────────────────────────────────
     if (action === "update_member") {
-      const { id, full_name, email, position, department_id, supervisor_id, avatar_url } = body;
+      const { id, full_name, email, position, department_id, supervisor_id, avatar_url, start_date } = body;
       const { error } = await db.from("team_members").update({
         full_name, email: email || null, position: position || "",
         department_id: department_id || null, supervisor_id: supervisor_id || null,
-        avatar_url: avatar_url || null, updated_at: new Date().toISOString(),
+        avatar_url: avatar_url || null, start_date: start_date || null,
+        updated_at: new Date().toISOString(),
       }).eq("id", id);
       if (error) return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       return new Response(JSON.stringify({ success: true }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });

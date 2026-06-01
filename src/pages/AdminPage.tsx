@@ -19,6 +19,7 @@ interface TeamMember {
   department_id: string | null;
   supervisor_id: string | null;
   avatar_url: string | null;
+  start_date: string | null;
 }
 
 interface MemberForm {
@@ -28,11 +29,12 @@ interface MemberForm {
   department_id: string;
   supervisor_id: string;
   avatar_url: string;
+  start_date: string;
 }
 
 const BLANK: MemberForm = {
   full_name: '', email: '', position: '',
-  department_id: '', supervisor_id: '', avatar_url: '',
+  department_id: '', supervisor_id: '', avatar_url: '', start_date: '',
 };
 
 async function callAdmin(action: string, payload: Record<string, unknown> = {}) {
@@ -430,6 +432,7 @@ function EditMemberModal({
     department_id: member.department_id ?? '',
     supervisor_id: member.supervisor_id ?? '',
     avatar_url: member.avatar_url ?? '',
+    start_date: member.start_date ?? '',
   });
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [preview, setPreview] = useState(member.avatar_url ?? '');
@@ -463,6 +466,7 @@ function EditMemberModal({
       department_id: form.department_id || null,
       supervisor_id: form.supervisor_id || null,
       avatar_url: avatar_url || null,
+      start_date: form.start_date || null,
     });
     if (result.error) { setErr(result.error); setSaving(false); return; }
     onSaved();
@@ -565,6 +569,13 @@ function EditMemberModal({
             value={form.supervisor_id}
             onChange={id => set('supervisor_id', id)}
           />
+
+          <Field label="START DATE">
+            <input type="date" value={form.start_date}
+              onChange={e => set('start_date', e.target.value)}
+              className="w-full rounded-xl px-4 py-2.5 text-sm outline-none"
+              style={{ background: '#ECEAE4', border: '1px solid #DDDBD5', color: '#2C2A27' }} />
+          </Field>
 
           {err && (
             <div className="flex items-center gap-2 px-4 py-3 rounded-xl text-sm"
@@ -788,6 +799,14 @@ export default function AdminPage({ onGoToChat }: { onGoToChat: () => void }) {
                             <span style={{ color: '#DDDBD5', fontSize: '10px' }}>•</span>
                             <span className="text-xs" style={{ color: '#B0ADA7' }}>
                               Reports to {supervisorName}
+                            </span>
+                          </>
+                        )}
+                        {m.start_date && (
+                          <>
+                            <span style={{ color: '#DDDBD5', fontSize: '10px' }}>•</span>
+                            <span className="text-xs" style={{ color: '#B0ADA7' }}>
+                              Since {new Date(m.start_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                             </span>
                           </>
                         )}
