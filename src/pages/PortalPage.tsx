@@ -13,6 +13,7 @@ import {
   Upload, Download, File, FileSpreadsheet,
   Paperclip, Folder, FolderOpen, ChevronRight, ChevronDown as ChevronDownIcon,
   GripVertical, Globe, Link as LinkIcon, ExternalLink, Send, Loader2,
+  Lock, Globe2, Search,
 } from 'lucide-react';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -23,6 +24,8 @@ interface PortalFolder {
   sort_order: number;
   is_open: boolean;
   department_access: string | null;
+  allowed_departments: string[] | null;
+  allowed_members: string[] | null;
 }
 
 interface PortalTab {
@@ -31,6 +34,8 @@ interface PortalTab {
   icon: string;
   sort_order: number;
   folder_id: string | null;
+  allowed_departments: string[] | null;
+  allowed_members: string[] | null;
 }
 
 interface TabFile {
@@ -585,7 +590,7 @@ function AddMenu({ onSelect, onClose }: { onSelect: (t: AddTarget) => void; onCl
 
 function SidebarTabRow({
   tab, activeTabId, authed, indent, isDragging, isDragOver,
-  onSelect, onEdit, onDelete, onDragStart, onDragOver, onDrop, onDragEnd,
+  onSelect, onEdit, onDelete, onAccess, onDragStart, onDragOver, onDrop, onDragEnd,
 }: {
   tab: PortalTab;
   activeTabId: string | null;
@@ -596,6 +601,7 @@ function SidebarTabRow({
   onSelect: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  onAccess: () => void;
   onDragStart: () => void;
   onDragOver: (e: React.DragEvent) => void;
   onDrop: () => void;
@@ -639,6 +645,12 @@ function SidebarTabRow({
       </button>
       {authed && (
         <div className="flex items-center gap-0.5 pr-1.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+          <button onClick={e => { e.stopPropagation(); onAccess(); }}
+            className="w-5 h-5 flex items-center justify-center rounded hover:bg-black/10 transition-colors"
+            style={{ color: (tab.allowed_departments?.length || tab.allowed_members?.length) ? '#C8A96E' : '#9A9690' }}
+            title="Access control">
+            <Lock className="w-3 h-3" strokeWidth={1.5} />
+          </button>
           <button onClick={e => { e.stopPropagation(); onEdit(); }}
             className="w-5 h-5 flex items-center justify-center rounded hover:bg-black/10 transition-colors"
             style={{ color: '#9A9690' }}>
@@ -651,6 +663,222 @@ function SidebarTabRow({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Access Control Panel ───────────────────────────────────────────────────
+
+const ALL_DEPARTMENTS = [
+  '3PL', 'Accounting', 'AI', 'Brokerage', 'CSR', 'Dispatch',
+  'Enterprise', 'Executive', 'Fleet', 'IT', 'Logs', 'MBI', 'Orbit Fuels', 'Sales', 'Warehouse',
+];
+
+interface AccessTarget {
+  kind: 'folder' | 'tab';
+  id: string;
+  label: string;
+  allowed_departments: string[] | null;
+  allowed_members: string[] | null;
+}
+
+function AccessControlPanel({
+  target,
+  onSave,
+  onClose,
+}: {
+  target: AccessTarget;
+  onSave: (id: string, kind: 'folder' | 'tab', depts: string[] | null, members: string[] | null) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [members, setMembers] = useState<{ full_name: string; department: string }[]>([]);
+  const [depts, setDepts] = useState<string[]>(target.allowed_departments ?? []);
+  const [people, setPeople] = useState<string[]>(target.allowed_members ?? []);
+  const [memberSearch, setMemberSearch] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [tab, setTab] = useState<'departments' | 'people'>('departments');
+
+  useEffect(() => {
+    supabase
+      .from('team_members')
+      .select('full_name, departments(name)')
+      .order('full_name')
+      .then(({ data }) => {
+        if (data) {
+          setMembers(data.map((m: { full_name: string; departments: { name: string } | null }) => ({
+            full_name: m.full_name,
+            department: (m.departments as { name: string } | null)?.name ?? '',
+          })));
+        }
+      });
+  }, []);
+
+  const isPublic = depts.length === 0 && people.length === 0;
+
+  function toggleDept(dept: string) {
+    setDepts(prev => prev.includes(dept) ? prev.filter(d => d !== dept) : [...prev, dept]);
+  }
+
+  function togglePerson(name: string) {
+    setPeople(prev => prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name]);
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    await onSave(
+      target.id,
+      target.kind,
+      depts.length > 0 ? depts : null,
+      people.length > 0 ? people : null,
+    );
+    setSaving(false);
+    onClose();
+  }
+
+  const filteredMembers = members.filter(m =>
+    m.full_name.toLowerCase().includes(memberSearch.toLowerCase()) ||
+    m.department.toLowerCase().includes(memberSearch.toLowerCase())
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.5)' }}
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="flex flex-col rounded-2xl shadow-2xl overflow-hidden" style={{
+        background: '#F5F3EE', border: '1px solid #DDDBD5', width: '420px', maxHeight: '85vh',
+      }}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 flex-shrink-0"
+          style={{ borderBottom: '1px solid #DDDBD5' }}>
+          <div className="flex items-center gap-2.5">
+            <Lock className="w-4 h-4" style={{ color: '#9A9690' }} strokeWidth={1.5} />
+            <div>
+              <p className="text-sm font-semibold" style={{ color: '#2C2A27' }}>Access Control</p>
+              <p className="text-xs truncate max-w-[240px]" style={{ color: '#9A9690' }}>{target.label}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-black/10"
+            style={{ color: '#9A9690' }}>
+            <X className="w-4 h-4" strokeWidth={1.5} />
+          </button>
+        </div>
+
+        {/* Public badge */}
+        <div className="px-5 pt-4 pb-2 flex-shrink-0">
+          <div className="flex items-center gap-2 px-3 py-2 rounded-xl" style={{
+            background: isPublic ? '#E8F4E8' : '#FFF8E8',
+            border: `1px solid ${isPublic ? '#B8DDB8' : '#F0D890'}`,
+          }}>
+            {isPublic
+              ? <Globe2 className="w-3.5 h-3.5 flex-shrink-0" style={{ color: '#4A8A4A' }} strokeWidth={1.5} />
+              : <Lock className="w-3.5 h-3.5 flex-shrink-0" style={{ color: '#A07820' }} strokeWidth={1.5} />}
+            <p className="text-xs" style={{ color: isPublic ? '#4A8A4A' : '#A07820' }}>
+              {isPublic
+                ? 'Visible to all portal users'
+                : `Restricted to ${[...depts, ...people].length} selection${[...depts, ...people].length !== 1 ? 's' : ''}`}
+            </p>
+            {!isPublic && (
+              <button className="ml-auto text-xs underline flex-shrink-0" style={{ color: '#A07820' }}
+                onClick={() => { setDepts([]); setPeople([]); }}>
+                Clear all
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex px-5 gap-1 flex-shrink-0 pb-2">
+          {(['departments', 'people'] as const).map(t => (
+            <button key={t} onClick={() => setTab(t)}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+              style={{
+                background: tab === t ? '#2C2A27' : 'transparent',
+                color: tab === t ? '#F5F3EE' : '#9A9690',
+              }}>
+              {t === 'departments' ? `Departments${depts.length ? ` (${depts.length})` : ''}` : `People${people.length ? ` (${people.length})` : ''}`}
+            </button>
+          ))}
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto px-5 pb-2 min-h-0">
+          {tab === 'departments' ? (
+            <div className="space-y-1">
+              {ALL_DEPARTMENTS.map(dept => {
+                const selected = depts.includes(dept);
+                return (
+                  <button key={dept} onClick={() => toggleDept(dept)}
+                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-colors text-left"
+                    style={{
+                      background: selected ? '#2C2A27' : '#ECEAE4',
+                      border: `1px solid ${selected ? '#2C2A27' : '#DDDBD5'}`,
+                    }}>
+                    <div className="w-4 h-4 rounded flex items-center justify-center flex-shrink-0"
+                      style={{ background: selected ? '#C8A96E' : '#DDDBD5' }}>
+                      {selected && <Check className="w-2.5 h-2.5" style={{ color: '#2C2A27' }} strokeWidth={2.5} />}
+                    </div>
+                    <span className="text-xs font-medium" style={{ color: selected ? '#F5F3EE' : '#2C2A27' }}>
+                      {dept}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <>
+              <div className="relative mb-2">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5" style={{ color: '#9A9690' }} strokeWidth={1.5} />
+                <input
+                  value={memberSearch}
+                  onChange={e => setMemberSearch(e.target.value)}
+                  placeholder="Search people..."
+                  className="w-full pl-8 pr-3 py-2 rounded-xl text-xs outline-none"
+                  style={{ background: '#ECEAE4', border: '1px solid #DDDBD5', color: '#2C2A27' }}
+                />
+              </div>
+              <div className="space-y-1">
+                {filteredMembers.map(m => {
+                  const selected = people.includes(m.full_name);
+                  return (
+                    <button key={m.full_name} onClick={() => togglePerson(m.full_name)}
+                      className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-colors text-left"
+                      style={{
+                        background: selected ? '#2C2A27' : '#ECEAE4',
+                        border: `1px solid ${selected ? '#2C2A27' : '#DDDBD5'}`,
+                      }}>
+                      <div className="w-4 h-4 rounded flex items-center justify-center flex-shrink-0"
+                        style={{ background: selected ? '#C8A96E' : '#DDDBD5' }}>
+                        {selected && <Check className="w-2.5 h-2.5" style={{ color: '#2C2A27' }} strokeWidth={2.5} />}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-medium truncate" style={{ color: selected ? '#F5F3EE' : '#2C2A27' }}>{m.full_name}</p>
+                        <p className="text-xs truncate" style={{ color: selected ? '#C0BDB7' : '#9A9690' }}>{m.department}</p>
+                      </div>
+                    </button>
+                  );
+                })}
+                {filteredMembers.length === 0 && (
+                  <p className="text-xs text-center py-4" style={{ color: '#9A9690' }}>No people found</p>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 py-4 flex items-center justify-end gap-2 flex-shrink-0"
+          style={{ borderTop: '1px solid #DDDBD5' }}>
+          <button onClick={onClose} className="px-4 py-2 rounded-xl text-xs font-medium"
+            style={{ background: '#ECEAE4', color: '#6B6865', border: '1px solid #DDDBD5' }}>
+            Cancel
+          </button>
+          <button onClick={handleSave} disabled={saving}
+            className="px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-opacity"
+            style={{ background: '#2C2A27', color: '#F5F3EE', opacity: saving ? 0.6 : 1 }}>
+            {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={2} /> : <Check className="w-3.5 h-3.5" strokeWidth={2} />}
+            Save
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1418,6 +1646,8 @@ function PortalInner({
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
 
+  const [accessTarget, setAccessTarget] = useState<AccessTarget | null>(null);
+
   const [iframeUrl, setIframeUrl] = useState<string | null>(null);
   const [iframeLabel, setIframeLabel] = useState<string>('');
 
@@ -1532,6 +1762,17 @@ function PortalInner({
     setDeletingFolderId(null);
   }
 
+  async function saveAccessControl(id: string, kind: 'folder' | 'tab', depts: string[] | null, members: string[] | null) {
+    const update = { allowed_departments: depts, allowed_members: members };
+    if (kind === 'folder') {
+      await supabase.from('portal_folders').update(update).eq('id', id);
+      setFolders(fs => fs.map(f => f.id === id ? { ...f, ...update } : f));
+    } else {
+      await supabase.from('portal_tabs').update(update).eq('id', id);
+      setTabs(ts => ts.map(t => t.id === id ? { ...t, ...update } : t));
+    }
+  }
+
   function toggleFolder(id: string) {
     setOpenFolders(prev => ({ ...prev, [id]: !prev[id] }));
   }
@@ -1623,6 +1864,7 @@ function PortalInner({
                       onSelect={() => setActiveTabId(tab.id)}
                       onEdit={() => { setEditingTabId(tab.id); setAddingWhat(null); }}
                       onDelete={() => setDeletingTabId(tab.id)}
+                      onAccess={() => setAccessTarget({ kind: 'tab', id: tab.id, label: tab.label, allowed_departments: tab.allowed_departments, allowed_members: tab.allowed_members })}
                       onDragStart={() => onTabDragStart(tab.id)}
                       onDragOver={e => onTabDragOverTab(e, tab.id)}
                       onDrop={() => onTabDropOnTab(tab.id)}
@@ -1668,6 +1910,13 @@ function PortalInner({
                         {authed && (
                           <div className="flex items-center gap-0.5 pr-1.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
                             onClick={e => e.stopPropagation()}>
+                            <button
+                              onClick={() => setAccessTarget({ kind: 'folder', id: folder.id, label: folder.label, allowed_departments: folder.allowed_departments, allowed_members: folder.allowed_members })}
+                              className="w-5 h-5 flex items-center justify-center rounded hover:bg-black/10 transition-colors"
+                              style={{ color: (folder.allowed_departments?.length || folder.allowed_members?.length) ? '#C8A96E' : '#9A9690' }}
+                              title="Access control">
+                              <Lock className="w-3 h-3" strokeWidth={1.5} />
+                            </button>
                             <button onClick={() => setEditingFolderId(folder.id)}
                               className="w-5 h-5 flex items-center justify-center rounded hover:bg-black/10 transition-colors"
                               style={{ color: '#9A9690' }}>
@@ -1697,6 +1946,7 @@ function PortalInner({
                               onSelect={() => setActiveTabId(tab.id)}
                               onEdit={() => { setEditingTabId(tab.id); setAddingWhat(null); }}
                               onDelete={() => setDeletingTabId(tab.id)}
+                              onAccess={() => setAccessTarget({ kind: 'tab', id: tab.id, label: tab.label, allowed_departments: tab.allowed_departments, allowed_members: tab.allowed_members })}
                               onDragStart={() => onTabDragStart(tab.id)}
                               onDragOver={e => onTabDragOverTab(e, tab.id)}
                               onDrop={() => onTabDropOnTab(tab.id)}
@@ -1953,6 +2203,14 @@ function PortalInner({
           </div>
         </div>
       )}
+
+      {accessTarget && (
+        <AccessControlPanel
+          target={accessTarget}
+          onSave={saveAccessControl}
+          onClose={() => setAccessTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -2012,10 +2270,24 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
       supabase.from('portal_tabs').select('*').order('sort_order'),
     ]);
 
-    // Only show folders tagged to this user's department
-    const depFolders = ((foldersData ?? []) as PortalFolder[]).filter(f => f.department_access === dept);
+    const memberName = member?.full_name ?? '';
+    const memberDept = dept;
+
+    function canAccessFolder(f: PortalFolder): boolean {
+      const hasNewRestriction = (f.allowed_departments?.length ?? 0) > 0 || (f.allowed_members?.length ?? 0) > 0;
+      if (!hasNewRestriction) return f.department_access === memberDept;
+      return (f.allowed_departments ?? []).includes(memberDept) || (f.allowed_members ?? []).includes(memberName);
+    }
+
+    function canAccessTab(t: PortalTab): boolean {
+      const hasRestriction = (t.allowed_departments?.length ?? 0) > 0 || (t.allowed_members?.length ?? 0) > 0;
+      if (!hasRestriction) return true;
+      return (t.allowed_departments ?? []).includes(memberDept) || (t.allowed_members ?? []).includes(memberName);
+    }
+
+    const depFolders = ((foldersData ?? []) as PortalFolder[]).filter(canAccessFolder);
     const depFolderIds = new Set(depFolders.map(f => f.id));
-    const depTabs = ((tabsData ?? []) as PortalTab[]).filter(t => t.folder_id && depFolderIds.has(t.folder_id));
+    const depTabs = ((tabsData ?? []) as PortalTab[]).filter(t => t.folder_id && depFolderIds.has(t.folder_id) && canAccessTab(t));
 
     setDeptFolders(depFolders);
     setTabs(depTabs);
