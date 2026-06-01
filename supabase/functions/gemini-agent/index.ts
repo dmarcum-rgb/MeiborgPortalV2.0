@@ -213,6 +213,9 @@ Deno.serve(async (req: Request) => {
     const docs = await fetchCompanyDocs();
     const systemPrompt = buildSystemPrompt(member, docs, formContext, formFields);
 
+    // Gemini system_instruction has a hard limit — truncate if needed
+    const truncatedPrompt = systemPrompt.length > 80000 ? systemPrompt.slice(0, 80000) + "\n\n[Context truncated for length]" : systemPrompt;
+
     // Build Gemini contents array — system instruction + conversation history
     const contents = messages.map((m: { role: string; content: string }) => ({
       role: m.role === "assistant" ? "model" : "user",
@@ -220,7 +223,7 @@ Deno.serve(async (req: Request) => {
     }));
 
     const geminiBody = {
-      system_instruction: { parts: [{ text: systemPrompt }] },
+      system_instruction: { parts: [{ text: truncatedPrompt }] },
       contents,
       generationConfig: {
         maxOutputTokens: 1024,
@@ -234,17 +237,26 @@ Deno.serve(async (req: Request) => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(geminiBody),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(45000),
       }
     );
 
     if (!geminiRes.ok) {
-      const err = await geminiRes.text();
-      throw new Error(`Gemini API error: ${err}`);
+      const errText = await geminiRes.text();
+      console.error("Gemini error response:", errText);
+      throw new Error(`Gemini API error ${geminiRes.status}: ${errText.slice(0, 500)}`);
     }
 
     const geminiData = await geminiRes.json();
-    const reply: string = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text ?? "Sorry, I couldn't generate a response.";
+
+    // Handle safety blocks or empty candidates
+    const candidate = geminiData?.candidates?.[0];
+    if (!candidate) {
+      const blockReason = geminiData?.promptFeedback?.blockReason;
+      throw new Error(`No candidates returned. Block reason: ${blockReason ?? "unknown"}`);
+    }
+
+    const reply: string = candidate?.content?.parts?.[0]?.text ?? "I'm sorry, I wasn't able to generate a response. Please try again.";
 
     // Detect form submission pattern in reply
     let emailSent = false;
