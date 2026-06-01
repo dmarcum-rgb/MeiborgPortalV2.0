@@ -1,3 +1,4 @@
+import Anthropic from "npm:@anthropic-ai/sdk@0.30.1";
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 const corsHeaders = {
@@ -132,7 +133,7 @@ function buildSystemPrompt(member: MemberContext, docs: PortalDoc[], formContext
 
   let prompt = `You are MeiGuy, a helpful HR and company assistant for ${firstName} at Meiborg Companies. ${firstName} works as ${pos} in the ${dept} department.
 
-You specialize in answering questions from the Employee Handbook and Company Docs, and helping employees fill out HR forms. Be warm, clear, and concise. Use plain language.
+You specialize in answering questions from the Employee Handbook and Company Docs, and helping employees fill out HR forms. Be warm, clear, and concise.
 
 ## What You Can Help With
 1. Answer Employee Handbook and company policy questions (PTO, FMLA, dress code, benefits, etc.)
@@ -141,13 +142,13 @@ You specialize in answering questions from the Employee Handbook and Company Doc
 4. Guide through company procedures
 
 ## HR Forms
-When helping with a form, ask fields one or two at a time. Once all fields are collected, present a summary and ask for confirmation. When confirmed, respond with a form submission confirmation and include the text FORM_SUBMIT: followed by a JSON object with the fields.
+When helping with a form, ask fields one or two at a time. Once all fields are collected, present a summary and ask the employee to confirm. Then call the submit_form tool.
 
 ## Company Context
 Meiborg Companies is a logistics and transportation company with divisions: MBI, Logistics, ENT, Ware, SAE, Orbit Fuels, and 3PL.
 ${firstName}'s role: ${pos} in ${dept}.
 
-Keep answers focused on HR policies and company information. Be genuinely helpful and friendly.`;
+Be genuinely helpful and friendly.`;
 
   if (docs.length > 0) {
     prompt += "\n\n## COMPANY DOCUMENTS\n";
@@ -206,75 +207,66 @@ Deno.serve(async (req: Request) => {
       memberContext?: MemberContext;
     };
 
-    const apiKey = Deno.env.get("GEMINI_API_KEY") ?? "";
-    if (!apiKey) throw new Error("GEMINI_API_KEY not configured");
+    const anthropic = new Anthropic({ apiKey: Deno.env.get("ANTHROPIC_API_KEY") ?? "" });
 
     const member = memberContext ?? {};
     const docs = await fetchCompanyDocs();
     const systemPrompt = buildSystemPrompt(member, docs, formContext, formFields);
 
-    // Gemini system_instruction has a hard limit — truncate if needed
-    const truncatedPrompt = systemPrompt.length > 80000 ? systemPrompt.slice(0, 80000) + "\n\n[Context truncated for length]" : systemPrompt;
-
-    // Build Gemini contents array — system instruction + conversation history
-    const contents = messages.map((m: { role: string; content: string }) => ({
-      role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: m.content }],
-    }));
-
-    const geminiBody = {
-      system_instruction: { parts: [{ text: truncatedPrompt }] },
-      contents,
-      generationConfig: {
-        maxOutputTokens: 1024,
-        temperature: 0.7,
-      },
-    };
-
-    const geminiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+    const tools: Anthropic.Tool[] = [
       {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(geminiBody),
-        signal: AbortSignal.timeout(45000),
+        name: "submit_form",
+        description: "Submit a completed HR form by email to HR. Only call when user has confirmed all details.",
+        input_schema: {
+          type: "object",
+          properties: {
+            form_type: { type: "string" },
+            fields: { type: "object" },
+            employee_name: { type: "string" },
+          },
+          required: ["form_type", "fields", "employee_name"],
+        },
+      },
+    ];
+
+    let response = await anthropic.messages.create({
+      model: "claude-haiku-4-5",
+      max_tokens: 1024,
+      system: systemPrompt,
+      messages: messages.map(m => ({ role: m.role as "user" | "assistant", content: m.content })),
+      tools,
+    });
+
+    if (response.stop_reason === "tool_use") {
+      const toolUse = response.content.find((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
+      if (toolUse?.name === "submit_form") {
+        const input = toolUse.input as { form_type: string; fields: Record<string, string>; employee_name: string };
+        const emailResult = await sendFormEmail(input.form_type, input.fields, input.employee_name);
+
+        const followUp = await anthropic.messages.create({
+          model: "claude-haiku-4-5",
+          max_tokens: 512,
+          system: systemPrompt,
+          messages: [
+            ...messages.map(m => ({ role: m.role as "user" | "assistant", content: m.content })),
+            { role: "assistant", content: response.content },
+            {
+              role: "user",
+              content: [{ type: "tool_result", tool_use_id: toolUse.id, content: emailResult ? "Email sent successfully." : "Email sending failed." }],
+            },
+          ],
+          tools,
+        });
+
+        const text = followUp.content.find((b): b is Anthropic.TextBlock => b.type === "text")?.text ?? "";
+        return new Response(JSON.stringify({ reply: text, emailSent: emailResult }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
-    );
-
-    if (!geminiRes.ok) {
-      const errText = await geminiRes.text();
-      console.error("Gemini error response:", errText);
-      throw new Error(`Gemini API error ${geminiRes.status}: ${errText.slice(0, 500)}`);
     }
 
-    const geminiData = await geminiRes.json();
-
-    // Handle safety blocks or empty candidates
-    const candidate = geminiData?.candidates?.[0];
-    if (!candidate) {
-      const blockReason = geminiData?.promptFeedback?.blockReason;
-      throw new Error(`No candidates returned. Block reason: ${blockReason ?? "unknown"}`);
-    }
-
-    const reply: string = candidate?.content?.parts?.[0]?.text ?? "I'm sorry, I wasn't able to generate a response. Please try again.";
-
-    // Detect form submission pattern in reply
-    let emailSent = false;
-    const submitMatch = reply.match(/FORM_SUBMIT:\s*(\{[\s\S]*?\})/);
-    if (submitMatch) {
-      try {
-        const parsed = JSON.parse(submitMatch[1]);
-        const tabName = formContext?.includes(" > ") ? formContext.split(" > ")[1].trim() : (formContext ?? "HR Form");
-        emailSent = await sendFormEmail(tabName, parsed, member.full_name ?? "Employee");
-      } catch {
-        // form parsing failed, skip email
-      }
-    }
-
-    // Strip the FORM_SUBMIT marker from the visible reply
-    const cleanReply = reply.replace(/FORM_SUBMIT:\s*\{[\s\S]*?\}/, "").trim();
-
-    return new Response(JSON.stringify({ reply: cleanReply || reply, emailSent }), {
+    const text = response.content.find((b): b is Anthropic.TextBlock => b.type === "text")?.text ?? "";
+    return new Response(JSON.stringify({ reply: text, emailSent: false }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (err) {
