@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Building2, ChevronDown, ChevronRight, Plus, Edit2, Trash2,
   Lock, Unlock, TrendingDown, DollarSign, Calendar, Percent,
-  X, Check, AlertTriangle, Search, TableProperties
+  X, Check, AlertTriangle, Search, TableProperties, FileText
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import compiledCsv from '../assets/Compiled_Amortization_Schedules.csv?raw';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -247,19 +248,111 @@ function LoanModal({
 interface AmortRow {
   n: number;
   date: string;
-  opening: number;
-  interest: number;
-  principal: number;
-  ending: number;
+  rawDate: Date | null;
+  opening: number | null;
+  interest: number | null;
+  principal: number | null;
+  ending: number | null;
+  payment: number | null;
+  notes: string;
+  fromCsv: boolean;
 }
 
-function buildSchedule(loan: DebtLoan): AmortRow[] {
+function parseMoney(s: string): number | null {
+  if (!s || s.trim() === '') return null;
+  const cleaned = s.replace(/[$,\s]/g, '');
+  const n = parseFloat(cleaned);
+  return isNaN(n) ? null : n;
+}
+
+function parseDate(s: string): Date | null {
+  if (!s || s.trim() === '') return null;
+  const parts = s.trim().split('/');
+  if (parts.length === 3) {
+    const m = parseInt(parts[0], 10);
+    const d = parseInt(parts[1], 10);
+    const y = parseInt(parts[2], 10);
+    if (!isNaN(m) && !isNaN(d) && !isNaN(y)) return new Date(y, m - 1, d);
+  }
+  return null;
+}
+
+// Parse the compiled CSV once and index by GL# (column index 2)
+function parseCsvSchedules(csv: string): Map<string, AmortRow[]> {
+  const map = new Map<string, AmortRow[]>();
+  const lines = csv.split('\n');
+  // skip header (line 0)
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    // Handle quoted fields with commas
+    const cols: string[] = [];
+    let cur = '';
+    let inQuote = false;
+    for (let c = 0; c < line.length; c++) {
+      const ch = line[c];
+      if (ch === '"') { inQuote = !inQuote; }
+      else if (ch === ',' && !inQuote) { cols.push(cur); cur = ''; }
+      else { cur += ch; }
+    }
+    cols.push(cur);
+
+    const glNum = cols[2]?.trim();
+    if (!glNum) continue;
+
+    const pmtNumStr = cols[16]?.trim();
+    const pmtNum = parseInt(pmtNumStr, 10);
+    if (isNaN(pmtNum)) continue;
+
+    const rawDate = parseDate(cols[17]?.trim());
+    const payment = parseMoney(cols[18]);
+    const principal = parseMoney(cols[19]);
+    const interest = parseMoney(cols[20]);
+    const ending = parseMoney(cols[21]);
+    const notes = cols[22]?.trim() ?? '';
+
+    // opening balance = ending + principal (if both present)
+    const opening = (ending !== null && principal !== null) ? ending + principal : null;
+
+    let dateLabel = '';
+    if (rawDate) {
+      dateLabel = rawDate.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    } else if (cols[17]?.trim()) {
+      dateLabel = cols[17].trim();
+    }
+
+    const row: AmortRow = {
+      n: pmtNum,
+      date: dateLabel,
+      rawDate,
+      opening,
+      interest,
+      principal,
+      ending,
+      payment,
+      notes,
+      fromCsv: true,
+    };
+
+    if (!map.has(glNum)) map.set(glNum, []);
+    map.get(glNum)!.push(row);
+  }
+
+  // Sort each loan's rows by payment number
+  for (const rows of map.values()) {
+    rows.sort((a, b) => a.n - b.n);
+  }
+
+  return map;
+}
+
+function buildFallbackSchedule(loan: DebtLoan): AmortRow[] {
   const rows: AmortRow[] = [];
   const monthlyRate = loan.interest_rate / 12;
   let balance = loan.balance;
   if (balance <= 0) return [];
 
-  // Determine starting month: day after origination or today if no origination
   let cursor: Date;
   if (loan.origination_date) {
     const orig = new Date(loan.origination_date + 'T00:00:00');
@@ -269,26 +362,21 @@ function buildSchedule(loan: DebtLoan): AmortRow[] {
     cursor = new Date(now.getFullYear(), now.getMonth() + 1, 1);
   }
 
-  // Seek forward to where balance matches current balance by finding how many
-  // payments have already been made (skip to today if cursor is in the past)
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  // If cursor is already in the past relative to today's approximate position, use next month
   if (cursor < today) {
     cursor = new Date(today.getFullYear(), today.getMonth() + 1, 1);
   }
 
   let n = 1;
-  const maxPayments = 600; // safety cap
+  const maxPayments = 600;
   while (balance > 0.005 && n <= maxPayments) {
     const interest = monthlyRate > 0 ? balance * monthlyRate : 0;
     const payment = Math.min(loan.monthly_payment, balance + interest);
     const principal = payment - interest;
     const ending = Math.max(0, balance - principal);
-
     const mo = cursor.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-    rows.push({ n, date: mo, opening: balance, interest, principal, ending });
-
+    rows.push({ n, date: mo, rawDate: new Date(cursor), opening: balance, interest, principal, ending, payment, notes: '', fromCsv: false });
     balance = ending;
     cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, cursor.getDate());
     n++;
@@ -296,15 +384,29 @@ function buildSchedule(loan: DebtLoan): AmortRow[] {
   return rows;
 }
 
-function AmortModal({ loan, onClose }: { loan: DebtLoan; onClose: () => void }) {
-  const schedule = buildSchedule(loan);
-  const totalInterest = schedule.reduce((s, r) => s + r.interest, 0);
-  const totalPrincipal = schedule.reduce((s, r) => s + r.principal, 0);
+function AmortModal({ loan, onClose, csvSchedules }: { loan: DebtLoan; onClose: () => void; csvSchedules: Map<string, AmortRow[]> }) {
+  const csvRows = csvSchedules.get(loan.loan_number) ?? [];
+  const hasCsv = csvRows.length > 0;
+  const schedule = hasCsv ? csvRows : buildFallbackSchedule(loan);
+
+  const totalInterest = schedule.reduce((s, r) => s + (r.interest ?? 0), 0);
+  const totalPrincipal = schedule.reduce((s, r) => s + (r.principal ?? 0), 0);
   const payoffDate = schedule.length > 0 ? schedule[schedule.length - 1].date : '—';
 
-  // Highlight row closest to today
-  const todayLabel = new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-  const todayIdx = schedule.findIndex(r => r.date === todayLabel);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  // Find the current/next payment row (first row with rawDate >= today that has actual payment data)
+  const todayIdx = schedule.findIndex(r => {
+    if (!r.rawDate) return false;
+    const d = new Date(r.rawDate);
+    d.setHours(0, 0, 0, 0);
+    return d >= today && r.payment !== null;
+  });
+
+  // Current balance from the row just before todayIdx (ending balance), or loan.balance
+  const currentBalanceRow = todayIdx > 0 ? schedule[todayIdx - 1].ending : null;
+  const displayBalance = currentBalanceRow !== null ? currentBalanceRow : loan.balance;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.75)' }}>
@@ -312,9 +414,21 @@ function AmortModal({ loan, onClose }: { loan: DebtLoan; onClose: () => void }) 
         {/* Header */}
         <div className="flex items-start justify-between px-6 py-4 flex-shrink-0" style={{ borderBottom: '1px solid #2C2A27' }}>
           <div>
-            <h2 className="text-base font-semibold" style={{ color: '#F5F3EE' }}>
-              Amortization Schedule — {loan.lender}
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-semibold" style={{ color: '#F5F3EE' }}>
+                Amortization Schedule — {loan.lender}
+              </h2>
+              {hasCsv ? (
+                <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium" style={{ background: 'rgba(74,222,128,0.1)', color: '#4ADE80' }}>
+                  <FileText className="w-3 h-3" />
+                  Actual Data
+                </span>
+              ) : (
+                <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium" style={{ background: 'rgba(200,169,110,0.1)', color: '#C8A96E' }}>
+                  Calculated
+                </span>
+              )}
+            </div>
             <p className="text-xs mt-0.5" style={{ color: '#6B6865' }}>
               {loan.description}{loan.entity ? ` · ${loan.entity}` : ''} · {fmtRate(loan.interest_rate)} · {fmtFull(loan.monthly_payment)}/mo
             </p>
@@ -327,7 +441,7 @@ function AmortModal({ loan, onClose }: { loan: DebtLoan; onClose: () => void }) 
         {/* Summary strip */}
         <div className="grid grid-cols-4 gap-px flex-shrink-0" style={{ background: '#2C2A27' }}>
           {[
-            { label: 'Current Balance', value: fmtFull(loan.balance), color: '#F5F3EE' },
+            { label: 'Current Balance', value: fmtFull(displayBalance), color: '#F5F3EE' },
             { label: 'Total Interest', value: fmt(totalInterest), color: '#F87171' },
             { label: 'Total Principal', value: fmt(totalPrincipal), color: '#4ADE80' },
             { label: 'Payoff Date', value: payoffDate, color: '#C8A96E' },
@@ -349,7 +463,7 @@ function AmortModal({ loan, onClose }: { loan: DebtLoan; onClose: () => void }) 
             <table className="w-full text-xs">
               <thead className="sticky top-0" style={{ background: '#141210', borderBottom: '1px solid #2C2A27' }}>
                 <tr>
-                  {['#', 'Date', 'Opening Balance', 'Interest', 'Principal', 'Ending Balance'].map(h => (
+                  {['#', 'Date', 'Payment', 'Opening Balance', 'Interest', 'Principal', 'Ending Balance'].map(h => (
                     <th key={h} className="px-4 py-2.5 text-right first:text-left font-medium whitespace-nowrap" style={{ color: '#6B6865' }}>{h}</th>
                   ))}
                 </tr>
@@ -358,24 +472,29 @@ function AmortModal({ loan, onClose }: { loan: DebtLoan; onClose: () => void }) 
                 {schedule.map((row, i) => {
                   const isToday = i === todayIdx;
                   const isFinal = i === schedule.length - 1;
+                  const hasData = row.payment !== null || row.principal !== null;
                   return (
                     <tr
                       key={row.n}
                       style={{
                         borderBottom: '1px solid #1A1917',
                         background: isToday ? 'rgba(200,169,110,0.07)' : isFinal ? 'rgba(74,222,128,0.05)' : 'transparent',
+                        opacity: hasData ? 1 : 0.4,
                       }}
                     >
                       <td className="px-4 py-2 font-mono" style={{ color: isToday ? '#C8A96E' : '#4A4844' }}>{row.n}</td>
                       <td className="px-4 py-2 whitespace-nowrap font-medium" style={{ color: isToday ? '#C8A96E' : isFinal ? '#4ADE80' : '#9A9690' }}>
                         {row.date}
-                        {isToday && <span className="ml-2 text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(200,169,110,0.15)', color: '#C8A96E' }}>Today</span>}
+                        {isToday && <span className="ml-2 text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(200,169,110,0.15)', color: '#C8A96E' }}>Current</span>}
                         {isFinal && !isToday && <span className="ml-2 text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(74,222,128,0.12)', color: '#4ADE80' }}>Payoff</span>}
                       </td>
-                      <td className="px-4 py-2 text-right font-mono" style={{ color: '#C8C4BC' }}>{fmtFull(row.opening)}</td>
-                      <td className="px-4 py-2 text-right font-mono" style={{ color: '#F87171' }}>{fmtFull(row.interest)}</td>
-                      <td className="px-4 py-2 text-right font-mono" style={{ color: '#4ADE80' }}>{fmtFull(row.principal)}</td>
-                      <td className="px-4 py-2 text-right font-mono font-semibold" style={{ color: row.ending <= 0 ? '#4ADE80' : '#F5F3EE' }}>{fmtFull(row.ending)}</td>
+                      <td className="px-4 py-2 text-right font-mono" style={{ color: '#C8C4BC' }}>{row.payment !== null ? fmtFull(row.payment) : '—'}</td>
+                      <td className="px-4 py-2 text-right font-mono" style={{ color: '#C8C4BC' }}>{row.opening !== null ? fmtFull(row.opening) : '—'}</td>
+                      <td className="px-4 py-2 text-right font-mono" style={{ color: '#F87171' }}>{row.interest !== null ? fmtFull(row.interest) : '—'}</td>
+                      <td className="px-4 py-2 text-right font-mono" style={{ color: '#4ADE80' }}>{row.principal !== null ? fmtFull(row.principal) : '—'}</td>
+                      <td className="px-4 py-2 text-right font-mono font-semibold" style={{ color: row.ending !== null && row.ending <= 0 ? '#4ADE80' : '#F5F3EE' }}>
+                        {row.ending !== null ? fmtFull(row.ending) : '—'}
+                      </td>
                     </tr>
                   );
                 })}
@@ -559,6 +678,8 @@ export default function DebtReport({ tabId, uploaderName }: DebtReportProps) {
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [amortLoan, setAmortLoan] = useState<DebtLoan | null>(null);
+
+  const csvSchedules = useMemo(() => parseCsvSchedules(compiledCsv), []);
 
   const canEdit = uploaderName.trim() !== '' && !locked;
 
@@ -818,7 +939,7 @@ export default function DebtReport({ tabId, uploaderName }: DebtReportProps) {
 
       {/* Amortization schedule modal */}
       {amortLoan && (
-        <AmortModal loan={amortLoan} onClose={() => setAmortLoan(null)} />
+        <AmortModal loan={amortLoan} onClose={() => setAmortLoan(null)} csvSchedules={csvSchedules} />
       )}
     </div>
   );
