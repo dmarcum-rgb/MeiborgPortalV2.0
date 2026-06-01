@@ -978,9 +978,156 @@ function TypingDotsFull() {
   );
 }
 
+// ── Exec Financial Panel ───────────────────────────────────────────────────
+// Shown only for Zach Meiborg on the MeiGuy home screen.
+// Fetches the latest AR, AP, and Unbilled Orders reports and displays
+// key financial metrics as a compact card panel.
+
+const TAB_IDS = {
+  ar: 'b8f2c697-6db0-4146-abce-352d778304d5',
+  ap: '6c2edf02-b176-444c-b8ef-8ad87bda86e0',
+  unbilled: 'ba3897f3-18e0-4f3e-b4bd-82d53ca75730',
+};
+
+interface ExecMetrics {
+  arTotal: number;
+  arPastDue: number;
+  arCustomers: number;
+  apTotal: number;
+  apPastDueAmount: number;
+  apPastDueCount: number;
+  unbilledCount: number;
+  unbilledTotal: number;
+  unbilledReadyCount: number;
+  unbilledReadyTotal: number;
+}
+
+function fmtDollars(n: number): string {
+  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}K`;
+  return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0 });
+}
+
+function ExecFinancialPanel() {
+  const [metrics, setMetrics] = useState<ExecMetrics | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      const [arRes, apRes, uboRes] = await Promise.all([
+        supabase.from('ar_reports').select('report_data').eq('tab_id', TAB_IDS.ar)
+          .order('created_at', { ascending: false }).limit(1).maybeSingle(),
+        supabase.from('ap_reports').select('report_data').eq('tab_id', TAB_IDS.ap)
+          .order('created_at', { ascending: false }).limit(1).maybeSingle(),
+        supabase.from('unbilled_orders_reports').select('report_data').eq('tab_id', TAB_IDS.unbilled)
+          .order('created_at', { ascending: false }).limit(1).maybeSingle(),
+      ]);
+
+      // AR metrics
+      let arTotal = 0, arPastDue = 0, arCustomers = 0;
+      if (arRes.data?.report_data) {
+        const customers = arRes.data.report_data as Array<{
+          totals: { balance: number; over30: number; over45: number; over60: number; over90: number };
+        }>;
+        arCustomers = customers.length;
+        arTotal = customers.reduce((s, c) => s + (c.totals?.balance ?? 0), 0);
+        arPastDue = customers.reduce((s, c) => s + (c.totals?.over30 ?? 0) + (c.totals?.over45 ?? 0) + (c.totals?.over60 ?? 0) + (c.totals?.over90 ?? 0), 0);
+      }
+
+      // AP metrics
+      let apTotal = 0, apPastDueAmount = 0, apPastDueCount = 0;
+      if (apRes.data?.report_data) {
+        const vendors = apRes.data.report_data as Array<{
+          totals: { balance: number; over30: number; over60: number; over90: number; over120: number; invoiceCount: number };
+        }>;
+        apTotal = vendors.reduce((s, v) => s + (v.totals?.balance ?? 0), 0);
+        apPastDueAmount = vendors.reduce((s, v) => s + (v.totals?.over30 ?? 0) + (v.totals?.over60 ?? 0) + (v.totals?.over90 ?? 0) + (v.totals?.over120 ?? 0), 0);
+        apPastDueCount = vendors.filter(v => ((v.totals?.over30 ?? 0) + (v.totals?.over60 ?? 0) + (v.totals?.over90 ?? 0) + (v.totals?.over120 ?? 0)) > 0).length;
+      }
+
+      // Unbilled Orders metrics
+      let unbilledCount = 0, unbilledTotal = 0, unbilledReadyCount = 0, unbilledReadyTotal = 0;
+      if (uboRes.data?.report_data) {
+        const orders = uboRes.data.report_data as Array<{ totalCharges: number; readyToBill: boolean }>;
+        unbilledCount = orders.length;
+        unbilledTotal = orders.reduce((s, o) => s + (o.totalCharges ?? 0), 0);
+        const ready = orders.filter(o => o.readyToBill);
+        unbilledReadyCount = ready.length;
+        unbilledReadyTotal = ready.reduce((s, o) => s + (o.totalCharges ?? 0), 0);
+      }
+
+      setMetrics({ arTotal, arPastDue, arCustomers, apTotal, apPastDueAmount, apPastDueCount, unbilledCount, unbilledTotal, unbilledReadyCount, unbilledReadyTotal });
+      setLoading(false);
+    })();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center w-72 h-48">
+        <div className="w-5 h-5 border-2 rounded-full animate-spin" style={{ borderColor: '#2C2A27', borderTopColor: '#C8A96E' }} />
+      </div>
+    );
+  }
+
+  if (!metrics) return null;
+
+  const sections = [
+    {
+      title: 'Accounts Receivable',
+      accent: '#60A5FA',
+      items: [
+        { label: 'Total AR Balance', value: fmtDollars(metrics.arTotal), color: '#F5F3EE' },
+        { label: 'Past Due (30+)', value: fmtDollars(metrics.arPastDue), color: metrics.arPastDue > 0 ? '#FB923C' : '#4ADE80' },
+        { label: 'Customers', value: metrics.arCustomers.toString(), color: '#9A9690' },
+      ],
+    },
+    {
+      title: 'Accounts Payable',
+      accent: '#F87171',
+      items: [
+        { label: 'Total AP Balance', value: fmtDollars(metrics.apTotal), color: '#F5F3EE' },
+        { label: 'Past Due Amount', value: fmtDollars(metrics.apPastDueAmount), color: metrics.apPastDueAmount > 0 ? '#F87171' : '#4ADE80' },
+        { label: 'Vendors Past Due', value: metrics.apPastDueCount.toString(), color: metrics.apPastDueCount > 0 ? '#FCD34D' : '#4ADE80' },
+      ],
+    },
+    {
+      title: 'Unbilled Orders',
+      accent: '#C8A96E',
+      items: [
+        { label: 'Total Orders', value: metrics.unbilledCount.toString(), color: '#9A9690' },
+        { label: 'Total Value', value: fmtDollars(metrics.unbilledTotal), color: '#F5F3EE' },
+        { label: `Ready to Bill (${metrics.unbilledReadyCount})`, value: fmtDollars(metrics.unbilledReadyTotal), color: '#4ADE80' },
+      ],
+    },
+  ];
+
+  return (
+    <div className="flex flex-col gap-3 w-72 flex-shrink-0" style={{ animation: 'fadeUp 0.6s ease both', animationDelay: '0.1s' }}>
+      <p className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: '#4A4844' }}>Financial Overview</p>
+      {sections.map(sec => (
+        <div key={sec.title} className="rounded-2xl p-4" style={{ background: '#141210', border: `1px solid #2C2A27` }}>
+          <div className="flex items-center gap-2 mb-3">
+            <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: sec.accent }} />
+            <span className="text-xs font-semibold" style={{ color: sec.accent }}>{sec.title}</span>
+          </div>
+          <div className="space-y-2">
+            {sec.items.map(item => (
+              <div key={item.label} className="flex items-center justify-between gap-3">
+                <span className="text-xs" style={{ color: '#6B6865' }}>{item.label}</span>
+                <span className="text-sm font-semibold tabular-nums" style={{ color: item.color }}>{item.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function MeiGuyFullChat({ member, onSignOut }: { member: LoggedInMember | null; onSignOut: () => void }) {
   const firstName = member?.full_name?.split(' ')[0] ?? '';
   const isExec = EXEC_NAMES.includes((member?.full_name ?? '').toLowerCase().trim());
+  const isZach = (member?.full_name ?? '').toLowerCase().trim() === 'zach meiborg';
   const suggestions = getSuggestions(member);
   const roleSubtitle = member?.position ? `${member.position}${member.department ? ` · ${member.department}` : ''}` : 'Meiborg Employee';
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -1075,35 +1222,46 @@ function MeiGuyFullChat({ member, onSignOut }: { member: LoggedInMember | null; 
 
         {/* Welcome hero — shown until first message */}
         {!hasConversation && (
-          <div className="flex flex-col items-center justify-center min-h-full px-4 pb-4 pt-16"
+          <div className={`flex min-h-full px-8 pb-8 pt-16 gap-12 ${isZach ? 'items-start justify-center' : 'items-center justify-center flex-col'}`}
             style={{ animation: 'fadeUp 0.5s ease both' }}>
-            <div className="w-16 h-16 rounded-3xl overflow-hidden mb-6" style={{ border: '2px solid #2C2A27', boxShadow: '0 0 40px rgba(200,169,110,0.08)' }}>
-              <img src="/Mei-Guy_icon_(1).png" alt="MeiGuy" className="w-full h-full object-contain" />
-            </div>
-            <h1 className="text-4xl font-semibold mb-2 text-center tracking-tight"
-              style={{ color: '#F5F3EE', fontFamily: "'Georgia', serif" }}>
-              {getGreeting()}{firstName ? `, ${firstName}` : ''}
-            </h1>
-            <p className="text-sm mb-1 text-center font-medium" style={{ color: '#6B6865' }}>
-              {roleSubtitle}
-            </p>
-            <p className="text-sm mb-10 text-center" style={{ color: '#4A4844' }}>
-              {isExec ? 'Full access — ask me anything about Meiborg.' : 'Your personal HR and company assistant.'}
-            </p>
 
-            {/* Suggestion chips */}
-            <div className="grid grid-cols-2 gap-2.5 w-full max-w-lg">
-              {suggestions.map(s => (
-                <button key={s.label} onClick={() => send(s.label)}
-                  className="text-left px-4 py-3 rounded-2xl text-sm transition-all"
-                  style={{ background: '#1A1917', border: '1px solid #262422', color: '#9A9690' }}
-                  onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = '#3D3A36'; (e.currentTarget as HTMLElement).style.color = '#F5F3EE'; }}
-                  onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = '#262422'; (e.currentTarget as HTMLElement).style.color = '#9A9690'; }}>
-                  <span className="block text-base mb-1">{s.icon}</span>
-                  {s.label}
-                </button>
-              ))}
+            {/* Center column — greeting + chips */}
+            <div className="flex flex-col items-center" style={{ maxWidth: '480px', width: '100%', flexShrink: 0 }}>
+              <div className="w-16 h-16 rounded-3xl overflow-hidden mb-6" style={{ border: '2px solid #2C2A27', boxShadow: '0 0 40px rgba(200,169,110,0.08)' }}>
+                <img src="/Mei-Guy_icon_(1).png" alt="MeiGuy" className="w-full h-full object-contain" />
+              </div>
+              <h1 className="text-4xl font-semibold mb-2 text-center tracking-tight"
+                style={{ color: '#F5F3EE', fontFamily: "'Georgia', serif" }}>
+                {getGreeting()}{firstName ? `, ${firstName}` : ''}
+              </h1>
+              <p className="text-sm mb-1 text-center font-medium" style={{ color: '#6B6865' }}>
+                {roleSubtitle}
+              </p>
+              <p className="text-sm mb-10 text-center" style={{ color: '#4A4844' }}>
+                {isExec ? 'Full access — ask me anything about Meiborg.' : 'Your personal HR and company assistant.'}
+              </p>
+
+              {/* Suggestion chips */}
+              <div className="grid grid-cols-2 gap-2.5 w-full">
+                {suggestions.map(s => (
+                  <button key={s.label} onClick={() => send(s.label)}
+                    className="text-left px-4 py-3 rounded-2xl text-sm transition-all"
+                    style={{ background: '#1A1917', border: '1px solid #262422', color: '#9A9690' }}
+                    onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = '#3D3A36'; (e.currentTarget as HTMLElement).style.color = '#F5F3EE'; }}
+                    onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = '#262422'; (e.currentTarget as HTMLElement).style.color = '#9A9690'; }}>
+                    <span className="block text-base mb-1">{s.icon}</span>
+                    {s.label}
+                  </button>
+                ))}
+              </div>
             </div>
+
+            {/* Financial panel — Zach only */}
+            {isZach && (
+              <div className="pt-2" style={{ marginTop: '88px' }}>
+                <ExecFinancialPanel />
+              </div>
+            )}
           </div>
         )}
 
