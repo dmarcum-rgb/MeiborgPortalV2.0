@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import ARReport from './ARReport';
+import APReport from './APReport';
 import DebtReport from './DebtReport';
 import DebtCalendar from './DebtCalendar';
 import {
@@ -1900,6 +1901,7 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
   const activeTab = tabs.find(t => t.id === activeTabId) ?? null;
   const activeFolder = activeTab?.folder_id ? deptFolders.find(f => f.id === activeTab.folder_id) ?? null : null;
   const isARTab = activeTab?.label?.toLowerCase().includes('accounts receivable') ?? false;
+  const isAPTab = activeTab?.label?.toLowerCase().includes('accounts payable') ?? false;
   const isDebtTab = activeTab?.label?.toLowerCase() === 'debts';
   const isCalendarTab = activeTab?.label?.toLowerCase().includes('payment calendar') ?? false;
   // Any dept folder tab → full screen mode
@@ -2052,6 +2054,8 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
             <div className="flex-1 overflow-hidden" style={{ background: '#0F0E0C' }}>
               {isARTab && activeTabId ? (
                 <ARReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
+              ) : isAPTab && activeTabId ? (
+                <APReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
               ) : isDebtTab && activeTabId ? (
                 <DebtReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
               ) : isCalendarTab && activeTabId ? (
