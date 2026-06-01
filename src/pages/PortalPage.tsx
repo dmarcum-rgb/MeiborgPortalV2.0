@@ -718,6 +718,17 @@ function inlineFmt(text: string): React.ReactNode {
 
 const EXEC_NAMES = ['zach meiborg', 'james cooper', 'megan dierks', 'tony askins', 'dallas marcum'];
 
+function getAgentEndpoint(member: LoggedInMember | null): string {
+  if (!member?.full_name) return 'gemini-agent';
+  const name = member.full_name.toLowerCase().trim();
+  if (EXEC_NAMES.includes(name)) return 'ai-agent';
+  const pos = (member.position ?? '').toLowerCase();
+  const dept = (member.department ?? '').toLowerCase();
+  const isAccounting = dept === 'accounting' || pos.includes('accounting') || pos.includes('billing') ||
+    pos.includes('payroll') || pos.includes('controller') || pos.includes('accounts');
+  return isAccounting ? 'ai-agent' : 'gemini-agent';
+}
+
 const EXEC_SUGGESTIONS: Record<string, Array<{ label: string; icon: string }>> = {
   'zach meiborg': [
     { label: 'Build a company financial summary', icon: '📊' },
@@ -1128,6 +1139,7 @@ function MeiGuyFullChat({ member, onSignOut }: { member: LoggedInMember | null; 
   const firstName = member?.full_name?.split(' ')[0] ?? '';
   const isExec = EXEC_NAMES.includes((member?.full_name ?? '').toLowerCase().trim());
   const isZach = (member?.full_name ?? '').toLowerCase().trim() === 'zach meiborg';
+  const agentEndpoint = getAgentEndpoint(member);
   const suggestions = getSuggestions(member);
   const roleSubtitle = member?.position ? `${member.position}${member.department ? ` · ${member.department}` : ''}` : 'Meiborg Employee';
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -1152,7 +1164,7 @@ function MeiGuyFullChat({ member, onSignOut }: { member: LoggedInMember | null; 
     if (inputRef.current) inputRef.current.style.height = 'auto';
     setLoadingMsg(true);
     try {
-      const res = await fetch(`${SUPABASE_URL_CHAT}/functions/v1/ai-agent`, {
+      const res = await fetch(`${SUPABASE_URL_CHAT}/functions/v1/${agentEndpoint}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1962,7 +1974,8 @@ interface DeptTabFile {
 
 function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; onSignOut: () => void }) {
   const dept = member?.department ?? '';
-  const canUseMeiGuy = (member?.org_level ?? 99) <= 3;
+  const canUseMeiGuy = true;
+  const agentEndpoint = getAgentEndpoint(member);
   const suggestions = getSuggestions(member);
   const firstName = member?.full_name?.split(' ')[0] ?? '';
   const roleSubtitle = member?.position ? `${member.position}${dept ? ` · ${dept}` : ''}` : 'Meiborg Employee';
@@ -2036,7 +2049,7 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
       const activeTab = tabs.find(t => t.id === activeTabId);
       const activeFolder = activeTab?.folder_id ? deptFolders.find(f => f.id === activeTab.folder_id) : null;
       const formContext = activeFolder ? `${activeFolder.label} > ${activeTab?.label ?? ''}` : activeTab?.label;
-      const res = await fetch(`${SUPABASE_URL}/functions/v1/ai-agent`, {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/${agentEndpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${SUPABASE_ANON_KEY}`, apikey: SUPABASE_ANON_KEY },
         body: JSON.stringify({
@@ -2509,28 +2522,6 @@ export default function PortalPage({
   const deptWithPortal = ['Accounting'];
   if (member?.department && deptWithPortal.includes(member.department)) {
     return <DeptPortalView member={member} onSignOut={handleSignOut} />;
-  }
-
-  // Level 3 and above get MeiGuy full chat; lower levels see an access notice
-  const orgLevel = member?.org_level ?? 99;
-  if (orgLevel > 3) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen gap-4" style={{ background: '#0F0E0C' }}>
-        <div className="w-14 h-14 rounded-2xl overflow-hidden" style={{ border: '1px solid #2C2A27' }}>
-          <img src="/Mei-Guy_icon_(1).png" alt="MeiGuy" className="w-full h-full object-contain" style={{ background: '#1A1917' }} />
-        </div>
-        <div className="text-center max-w-xs">
-          <p className="text-base font-semibold" style={{ color: '#F5F3EE' }}>MeiGuy is not available</p>
-          <p className="text-sm mt-1" style={{ color: '#6B6865' }}>Access to MeiGuy is limited to level 3 and above.</p>
-        </div>
-        <button
-          onClick={handleSignOut}
-          className="mt-2 px-4 py-2 rounded-lg text-sm"
-          style={{ background: '#1A1917', border: '1px solid #2C2A27', color: '#9A9690' }}>
-          Sign out
-        </button>
-      </div>
-    );
   }
 
   return <MeiGuyFullChat member={member} onSignOut={handleSignOut} />;
