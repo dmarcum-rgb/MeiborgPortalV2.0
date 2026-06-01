@@ -488,14 +488,15 @@ async function fetchAccountingData(supabaseUrl: string, serviceKey: string): Pro
       let summary = `### ${tabLabel} (${locked}${reportDate}${uploadedBy})\n`;
       summary += `Total customers: ${customers.length}\n`;
 
-      // Summarize key financial fields
+      // Summarize key financial fields — data is stored with nested `totals` object per customer
       const totals = customers.reduce((acc, c) => {
-        acc.balance += Number(c.balance ?? 0);
-        acc.current += Number(c.current ?? 0);
-        acc.over30 += Number(c.over30 ?? 0);
-        acc.over45 += Number(c.over45 ?? 0);
-        acc.over60 += Number(c.over60 ?? 0);
-        acc.over90 += Number(c.over90 ?? 0);
+        const t = (c.totals ?? c) as Record<string, unknown>;
+        acc.balance += Number(t.balance ?? 0);
+        acc.current += Number(t.current ?? 0);
+        acc.over30 += Number(t.over30 ?? 0);
+        acc.over45 += Number(t.over45 ?? 0);
+        acc.over60 += Number(t.over60 ?? 0);
+        acc.over90 += Number(t.over90 ?? 0);
         return acc;
       }, { balance: 0, current: 0, over30: 0, over45: 0, over60: 0, over90: 0 });
 
@@ -506,10 +507,16 @@ async function fetchAccountingData(supabaseUrl: string, serviceKey: string): Pro
       // List each customer with their balance breakdown
       summary += "\nCustomer detail:\n";
       for (const c of customers) {
-        summary += `- ${c.name ?? c.code} (${c.code}): balance ${fmt(Number(c.balance ?? 0))}`;
-        if (Number(c.over90 ?? 0) > 0) summary += ` [90+ DAYS: ${fmt(Number(c.over90))}]`;
-        else if (Number(c.over60 ?? 0) > 0) summary += ` [60+ days: ${fmt(Number(c.over60))}]`;
-        else if (Number(c.over30 ?? 0) > 0) summary += ` [30+ days: ${fmt(Number(c.over30))}]`;
+        const t = (c.totals ?? c) as Record<string, unknown>;
+        const bal = Number(t.balance ?? 0);
+        const o90 = Number(t.over90 ?? 0);
+        const o60 = Number(t.over60 ?? 0);
+        const o30 = Number(t.over30 ?? 0);
+        if (bal === 0) continue; // skip zero-balance customers to keep context concise
+        summary += `- ${c.name ?? c.code} (${c.code}): balance ${fmt(bal)}`;
+        if (o90 > 0) summary += ` [90+ DAYS: ${fmt(o90)}]`;
+        else if (o60 > 0) summary += ` [60+ days: ${fmt(o60)}]`;
+        else if (o30 > 0) summary += ` [30+ days: ${fmt(o30)}]`;
         summary += "\n";
       }
 
