@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import ARReport from './ARReport';
 import DebtReport from './DebtReport';
+import DebtCalendar from './DebtCalendar';
 import {
   MessageSquare, Shield, Network, Home, FileText, Users, Star, Bell,
   BookOpen, Briefcase, Calendar, Heart, Image,
@@ -1899,7 +1900,8 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
   const activeTab = tabs.find(t => t.id === activeTabId) ?? null;
   const activeFolder = activeTab?.folder_id ? deptFolders.find(f => f.id === activeTab.folder_id) ?? null : null;
   const isARTab = activeTab?.label?.toLowerCase().includes('accounts receivable') ?? false;
-  const isDebtTab = activeTab?.label?.toLowerCase().includes('debts') ?? false;
+  const isDebtTab = activeTab?.label?.toLowerCase() === 'debts';
+  const isCalendarTab = activeTab?.label?.toLowerCase().includes('payment calendar') ?? false;
   // Any dept folder tab → full screen mode
   const isDeptTab = activeTabId != null && activeFolder != null;
 
@@ -2052,6 +2054,8 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
                 <ARReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
               ) : isDebtTab && activeTabId ? (
                 <DebtReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
+              ) : isCalendarTab && activeTabId ? (
+                <DebtCalendar tabId={activeTabId} />
               ) : (
                 <div className="flex flex-col items-center justify-center h-full gap-3">
                   <div className="w-14 h-14 rounded-2xl flex items-center justify-center" style={{ background: '#1A1917', border: '1px solid #262422' }}>
