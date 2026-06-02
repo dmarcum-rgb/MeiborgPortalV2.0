@@ -2,9 +2,60 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Upload, ChevronDown, ChevronRight, AlertTriangle,
   Lock, Unlock, Search, X, Truck, MapPin, User,
-  FileText, DollarSign, Clock,
+  FileText, DollarSign, Clock, RefreshCw,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+
+const MCLEOD_FN = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/mcleod-pull`;
+const MCLEOD_HEADERS = {
+  Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+  'Content-Type': 'application/json',
+};
+
+function parseMcleodDate(s: string | null | undefined): string {
+  if (!s || s.length < 8) return '';
+  const y = s.slice(0, 4), mo = s.slice(4, 6), d = s.slice(6, 8);
+  return `${parseInt(mo)}/${parseInt(d)}/${y}`;
+}
+
+function mcleodAgeDays(dateStr: string | null | undefined): number | null {
+  if (!dateStr || dateStr.length < 8) return null;
+  const y = parseInt(dateStr.slice(0, 4));
+  const mo = parseInt(dateStr.slice(4, 6)) - 1;
+  const d = parseInt(dateStr.slice(6, 8));
+  return Math.floor((new Date().getTime() - new Date(y, mo, d).getTime()) / 86400000);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapMcleodUnbilled(rows: any[]): UBOReportData {
+  const today = new Date().toLocaleDateString('en-US');
+  const orders: UBOOrder[] = rows.map(row => ({
+    orderNum: row.id ?? '',
+    schedShipDate: parseMcleodDate(row.ordered_date),
+    onHold: row.on_hold === true || row.on_hold === 'Y',
+    readyToBill: row.ready_to_bill === 'Y',
+    transferred: false,
+    customerCode: row.customer_id ?? '',
+    customerName: row.customer_id ?? '',
+    totalCharges: parseFloat(row.freight_charge) || 0,
+    revCode: row.equipment_type_id ?? '',
+    ageSinceDelivery: mcleodAgeDays(row.actual_delivery_date),
+    movements: row.curr_movement_id ? [{
+      movementNum: row.curr_movement_id,
+      origin: '',
+      destination: '',
+      tractorNum: '',
+      driver: '',
+      carrier: '',
+      carrierContact: '',
+      carrierPay: 0,
+      carrierPhone: '',
+      dispatcher: '',
+      carrierEmail: '',
+    }] : [],
+  }));
+  return { reportDate: today, orders };
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -396,6 +447,7 @@ export default function UnbilledOrdersReport({ tabId, uploaderName }: UnbilledOr
   const [lockToggling, setLockToggling] = useState(false);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [pulling, setPulling] = useState(false);
   const [search, setSearch] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -420,6 +472,37 @@ export default function UnbilledOrdersReport({ tabId, uploaderName }: UnbilledOr
   }, [tabId]);
 
   useEffect(() => { loadReport(); }, [loadReport]);
+
+  async function pullFromMcLeod() {
+    if (locked) return;
+    setError(null);
+    setPulling(true);
+    try {
+      const res = await fetch(`${MCLEOD_FN}?report=unbilled`, { headers: MCLEOD_HEADERS });
+      if (!res.ok) throw new Error(`McLeod pull failed: ${res.status}`);
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      const parsed = mapMcleodUnbilled(json.rows ?? []);
+      if (!parsed.orders.length) { setError('No unbilled orders returned from McLeod.'); setPulling(false); return; }
+
+      await supabase.from('unbilled_orders_reports').delete().eq('tab_id', tabId);
+      const { data: inserted } = await supabase.from('unbilled_orders_reports').insert({
+        tab_id: tabId,
+        report_date: parsed.reportDate,
+        report_data: parsed.orders,
+        uploaded_by: uploaderName,
+        locked: false,
+      }).select('id').single();
+
+      setReport(parsed);
+      setReportId(inserted?.id ?? null);
+      setLocked(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to pull from McLeod.');
+    } finally {
+      setPulling(false);
+    }
+  }
 
   async function handleFile(file: File) {
     if (locked) return;
@@ -589,6 +672,20 @@ export default function UnbilledOrdersReport({ tabId, uploaderName }: UnbilledOr
               {lockToggling
                 ? <div className="w-3 h-3 border-2 rounded-full animate-spin" style={{ borderColor: '#7F1D1D', borderTopColor: '#EF4444' }} />
                 : <><Lock className="w-3 h-3" strokeWidth={2} />Locked — Unlock</>}
+            </button>
+          )}
+          {!locked && (
+            <button
+              onClick={pullFromMcLeod}
+              disabled={pulling || uploading}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
+              style={{ background: '#1A2A1A', color: '#4ADE80', border: '1px solid #166534' }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#1E3A1E'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = '#1A2A1A'; }}
+            >
+              {pulling
+                ? <><div className="w-3 h-3 border-2 rounded-full animate-spin" style={{ borderColor: '#166534', borderTopColor: '#4ADE80' }} />Pulling…</>
+                : <><RefreshCw className="w-3 h-3" />Pull from McLeod</>}
             </button>
           )}
           {!locked && (

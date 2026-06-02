@@ -1,9 +1,87 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Upload, ChevronDown, ChevronRight, AlertTriangle,
-  Lock, Unlock, Search, Building2, FileText
+  Lock, Unlock, Search, Building2, FileText, RefreshCw
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+
+const MCLEOD_FN = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/mcleod-pull`;
+const MCLEOD_HEADERS = {
+  Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+  'Content-Type': 'application/json',
+};
+
+function parseMcleodDate(s: string | null | undefined): string {
+  if (!s || s.length < 8) return '';
+  const y = s.slice(0, 4), mo = s.slice(4, 6), d = s.slice(6, 8);
+  return `${parseInt(mo)}/${parseInt(d)}/${y}`;
+}
+
+function mcleodAPDueDays(dueDateStr: string | null | undefined): number | null {
+  if (!dueDateStr || dueDateStr.length < 8) return null;
+  const y = parseInt(dueDateStr.slice(0, 4));
+  const mo = parseInt(dueDateStr.slice(4, 6)) - 1;
+  const d = parseInt(dueDateStr.slice(6, 8));
+  const then = new Date(y, mo, d);
+  return Math.floor((new Date().getTime() - then.getTime()) / 86400000);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapMcleodAP(rows: any[]): APReportData {
+  const today = new Date().toLocaleDateString('en-US');
+  const vendorMap = new Map<string, APVendor>();
+
+  for (const row of rows) {
+    const vendorId: string = row.vendor_id ?? '';
+    const vendorName: string = row.vendor_id_row?.name ?? vendorId;
+    const balance = parseFloat(row.balance) || 0;
+    const dueDate: string = row.due_date ?? '';
+    const days = mcleodAPDueDays(dueDate);
+
+    let current = 0, over30 = 0, over60 = 0, over90 = 0, over120 = 0;
+    if (days == null || days <= 0) current = balance;
+    else if (days <= 30) current = balance;
+    else if (days <= 60) over30 = balance;
+    else if (days <= 90) over60 = balance;
+    else if (days <= 120) over90 = balance;
+    else over120 = balance;
+
+    if (!vendorMap.has(vendorId)) {
+      vendorMap.set(vendorId, {
+        code: vendorId,
+        name: vendorName,
+        invoices: [],
+        totals: { balance: 0, current: 0, over30: 0, over60: 0, over90: 0, over120: 0, invoiceCount: 0 },
+      });
+    }
+    const vendor = vendorMap.get(vendorId)!;
+    vendor.invoices.push({
+      voucherNum: row.invoice_number ?? '',
+      invoiceNum: row.invoice_number ?? '',
+      invoiceDate: parseMcleodDate(row.invoice_date),
+      glDate: '',
+      dueDate: parseMcleodDate(dueDate),
+      addrCode: '',
+      poNumber: '',
+      balance, current, over30, over60, over90, over120,
+    });
+  }
+
+  const vendors = Array.from(vendorMap.values()).map(v => {
+    v.totals = {
+      balance: v.invoices.reduce((s, i) => s + i.balance, 0),
+      current: v.invoices.reduce((s, i) => s + i.current, 0),
+      over30: v.invoices.reduce((s, i) => s + i.over30, 0),
+      over60: v.invoices.reduce((s, i) => s + i.over60, 0),
+      over90: v.invoices.reduce((s, i) => s + i.over90, 0),
+      over120: v.invoices.reduce((s, i) => s + i.over120, 0),
+      invoiceCount: v.invoices.length,
+    };
+    return v;
+  }).sort((a, b) => b.totals.balance - a.totals.balance);
+
+  return { reportDate: today, vendors };
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -431,6 +509,7 @@ export default function APReport({ tabId, uploaderName }: APReportProps) {
   const [lockToggling, setLockToggling] = useState(false);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [pulling, setPulling] = useState(false);
   const [search, setSearch] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -454,6 +533,37 @@ export default function APReport({ tabId, uploaderName }: APReportProps) {
   }, [tabId]);
 
   useEffect(() => { loadReport(); }, [loadReport]);
+
+  async function pullFromMcLeod() {
+    if (locked) return;
+    setError(null);
+    setPulling(true);
+    try {
+      const res = await fetch(`${MCLEOD_FN}?report=ap`, { headers: MCLEOD_HEADERS });
+      if (!res.ok) throw new Error(`McLeod pull failed: ${res.status}`);
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      const parsed = mapMcleodAP(json.rows ?? []);
+      if (!parsed.vendors.length) { setError('No AP data returned from McLeod.'); setPulling(false); return; }
+
+      await supabase.from('ap_reports').delete().eq('tab_id', tabId);
+      const { data: inserted } = await supabase.from('ap_reports').insert({
+        tab_id: tabId,
+        report_date: parsed.reportDate,
+        report_data: parsed.vendors,
+        uploaded_by: uploaderName,
+        locked: false,
+      }).select('id').single();
+
+      setReport(parsed);
+      setReportId(inserted?.id ?? null);
+      setLocked(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to pull from McLeod.');
+    } finally {
+      setPulling(false);
+    }
+  }
 
   async function handleFile(file: File) {
     if (locked) return;
@@ -595,6 +705,20 @@ export default function APReport({ tabId, uploaderName }: APReportProps) {
               {lockToggling
                 ? <div className="w-3 h-3 border-2 rounded-full animate-spin" style={{ borderColor: '#7F1D1D', borderTopColor: '#EF4444' }} />
                 : <><Lock className="w-3 h-3" strokeWidth={2} />Locked — Unlock</>}
+            </button>
+          )}
+          {!locked && (
+            <button
+              onClick={pullFromMcLeod}
+              disabled={pulling || uploading}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
+              style={{ background: '#1A2A1A', color: '#4ADE80', border: '1px solid #166534' }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#1E3A1E'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = '#1A2A1A'; }}
+            >
+              {pulling
+                ? <><div className="w-3 h-3 border-2 rounded-full animate-spin" style={{ borderColor: '#166534', borderTopColor: '#4ADE80' }} />Pulling…</>
+                : <><RefreshCw className="w-3 h-3" />Pull from McLeod</>}
             </button>
           )}
           {!locked && (

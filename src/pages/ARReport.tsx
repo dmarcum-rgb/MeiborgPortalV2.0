@@ -1,7 +1,100 @@
 import { useState, useEffect, useRef } from 'react';
 import * as XLSX from 'xlsx';
-import { Upload, ChevronDown, ChevronRight, Phone, User, Clock, CreditCard, AlertTriangle, TrendingUp, X, Lock, Unlock } from 'lucide-react';
+import { Upload, ChevronDown, ChevronRight, Phone, User, Clock, CreditCard, AlertTriangle, TrendingUp, X, Lock, Unlock, RefreshCw } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+
+const MCLEOD_FN = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/mcleod-pull`;
+const MCLEOD_HEADERS = {
+  Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+  'Content-Type': 'application/json',
+};
+
+function parseMcleodDate(s: string | null | undefined): string {
+  if (!s || s.length < 8) return '';
+  const y = s.slice(0, 4), mo = s.slice(4, 6), d = s.slice(6, 8);
+  return `${parseInt(mo)}/${parseInt(d)}/${y}`;
+}
+
+function mcleodAgeDays(dateStr: string | null | undefined): number | null {
+  if (!dateStr || dateStr.length < 8) return null;
+  const y = parseInt(dateStr.slice(0, 4));
+  const mo = parseInt(dateStr.slice(4, 6)) - 1;
+  const d = parseInt(dateStr.slice(6, 8));
+  const then = new Date(y, mo, d);
+  const now = new Date();
+  return Math.floor((now.getTime() - then.getTime()) / 86400000);
+}
+
+function mcleodARBucket(days: number | null): { current: number; over30: number; over45: number; over60: number; over90: number } {
+  const r = { current: 0, over30: 0, over45: 0, over60: 0, over90: 0 };
+  if (days == null) return r;
+  if (days <= 0) r.current = 1;
+  else if (days <= 30) r.current = 1;
+  else if (days <= 45) r.over30 = 1;
+  else if (days <= 60) r.over45 = 1;
+  else if (days <= 90) r.over60 = 1;
+  else r.over90 = 1;
+  return r;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapMcleodAR(rows: any[]): ARReportData {
+  const today = new Date().toLocaleDateString('en-US');
+  const custMap = new Map<string, ARCustomer>();
+
+  for (const row of rows) {
+    const custId: string = row.customer_id ?? '';
+    const custName: string = row.customer_id_row?.name ?? custId;
+    const amount = parseFloat(row.amount) || 0;
+    const billDate: string = row.bill_date ?? '';
+    const days = mcleodAgeDays(billDate);
+    const buckets = mcleodARBucket(days);
+    const bucketAmt = { current: 0, over30: 0, over45: 0, over60: 0, over90: 0 };
+    for (const k of Object.keys(buckets) as (keyof typeof buckets)[]) {
+      bucketAmt[k] = buckets[k] ? amount : 0;
+    }
+
+    if (!custMap.has(custId)) {
+      custMap.set(custId, {
+        code: custId,
+        name: custName,
+        location: [row.customer_id_row?.city, row.customer_id_row?.state].filter(Boolean).join(', '),
+        payablesContact: '',
+        phone: '',
+        avgPayDays: null,
+        lastPmtDate: '',
+        invoices: [],
+        totals: { balance: 0, current: 0, over30: 0, over45: 0, over60: 0, over90: 0 },
+      });
+    }
+    const cust = custMap.get(custId)!;
+    cust.invoices.push({
+      shipDate: parseMcleodDate(row.ship_date),
+      billDate: parseMcleodDate(billDate),
+      glDate: parseMcleodDate(row.gl_date),
+      order: row.order_id ?? row.invoice_no_string ?? '',
+      age: days,
+      amount,
+      balance: amount,
+      ...bucketAmt,
+      lastCallDate: '',
+    });
+  }
+
+  const customers = Array.from(custMap.values()).map(c => {
+    c.totals = c.invoices.reduce((acc, inv) => ({
+      balance: acc.balance + inv.balance,
+      current: acc.current + inv.current,
+      over30: acc.over30 + inv.over30,
+      over45: acc.over45 + inv.over45,
+      over60: acc.over60 + inv.over60,
+      over90: acc.over90 + inv.over90,
+    }), { balance: 0, current: 0, over30: 0, over45: 0, over60: 0, over90: 0 });
+    return c;
+  }).sort((a, b) => b.totals.balance - a.totals.balance);
+
+  return { reportDate: today, customers };
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -568,6 +661,7 @@ export default function ARReport({ tabId, uploaderName }: Props) {
   const [lockToggling, setLockToggling] = useState(false);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [pulling, setPulling] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -591,6 +685,37 @@ export default function ARReport({ tabId, uploaderName }: Props) {
       setLoading(false);
     })();
   }, [tabId]);
+
+  async function pullFromMcLeod() {
+    if (locked) return;
+    setError(null);
+    setPulling(true);
+    try {
+      const res = await fetch(`${MCLEOD_FN}?report=ar`, { headers: MCLEOD_HEADERS });
+      if (!res.ok) throw new Error(`McLeod pull failed: ${res.status}`);
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      const parsed = mapMcleodAR(json.rows ?? []);
+      if (!parsed.customers.length) { setError('No AR data returned from McLeod.'); setPulling(false); return; }
+
+      await supabase.from('ar_reports').delete().eq('tab_id', tabId);
+      await supabase.from('ar_reports').insert({
+        tab_id: tabId,
+        report_date: parsed.reportDate,
+        report_data: parsed.customers,
+        uploaded_by: uploaderName,
+        locked: false,
+      });
+      const { data: inserted } = await supabase.from('ar_reports').select('id').eq('tab_id', tabId).order('created_at', { ascending: false }).limit(1).maybeSingle();
+      setReport(parsed);
+      setReportId(inserted?.id ?? null);
+      setLocked(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to pull from McLeod.');
+    } finally {
+      setPulling(false);
+    }
+  }
 
   async function toggleLock() {
     setLockToggling(true);
@@ -751,6 +876,22 @@ export default function ARReport({ tabId, uploaderName }: Props) {
             </button>
           )}
           {/* Upload button — hidden when locked */}
+          {!locked && (
+            <button
+              onClick={pullFromMcLeod}
+              disabled={pulling || uploading}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all disabled:opacity-50"
+              style={{ background: '#1A2A1A', color: '#4ADE80', border: '1px solid #166534' }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#1E3A1E'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = '#1A2A1A'; }}
+            >
+              {pulling ? (
+                <><div className="w-3 h-3 border-2 rounded-full animate-spin" style={{ borderColor: '#166534', borderTopColor: '#4ADE80' }} />Pulling…</>
+              ) : (
+                <><RefreshCw className="w-3 h-3" strokeWidth={2} />Pull from McLeod</>
+              )}
+            </button>
+          )}
           {!locked && (
             <button
               onClick={() => fileRef.current?.click()}

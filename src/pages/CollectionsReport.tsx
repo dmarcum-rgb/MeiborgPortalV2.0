@@ -2,9 +2,86 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Upload, ChevronDown, ChevronRight, AlertTriangle,
   Lock, Unlock, Search, Users, FileText, Phone, Mail,
-  DollarSign, X,
+  DollarSign, X, RefreshCw,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+
+const MCLEOD_FN = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/mcleod-pull`;
+const MCLEOD_HEADERS = {
+  Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+  'Content-Type': 'application/json',
+};
+
+function parseMcleodDate(s: string | null | undefined): string {
+  if (!s || s.length < 8) return '';
+  const y = s.slice(0, 4), mo = s.slice(4, 6), d = s.slice(6, 8);
+  return `${parseInt(mo)}/${parseInt(d)}/${y}`;
+}
+
+function mcleodAgeDays(dateStr: string | null | undefined): number | null {
+  if (!dateStr || dateStr.length < 8) return null;
+  const y = parseInt(dateStr.slice(0, 4));
+  const mo = parseInt(dateStr.slice(4, 6)) - 1;
+  const d = parseInt(dateStr.slice(6, 8));
+  return Math.floor((new Date().getTime() - new Date(y, mo, d).getTime()) / 86400000);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapMcleodCollections(rows: any[]): CollReportData {
+  const today = new Date().toLocaleDateString('en-US');
+  const custMap = new Map<string, CollCustomer>();
+
+  for (const row of rows) {
+    const custId: string = row.customer_id ?? '';
+    const custName: string = row.customer_id_row?.name ?? custId;
+    const amount = parseFloat(row.amount) || 0;
+    const days = mcleodAgeDays(row.bill_date);
+
+    let current = 0, over30 = 0, over60 = 0, over90 = 0, over120 = 0;
+    if (days == null || days <= 30) current = amount;
+    else if (days <= 60) over30 = amount;
+    else if (days <= 90) over60 = amount;
+    else if (days <= 120) over90 = amount;
+    else over120 = amount;
+
+    if (!custMap.has(custId)) {
+      custMap.set(custId, {
+        code: custId,
+        name: custName,
+        contact: '',
+        phone: row.customer_id_row?.phone ?? '',
+        email: '',
+        invoices: [],
+        totals: { balance: 0, current: 0, over30: 0, over60: 0, over90: 0, over120: 0, invoiceCount: 0 },
+      });
+    }
+    const cust = custMap.get(custId)!;
+    cust.invoices.push({
+      invoiceNum: row.invoice_no_string ?? row.invoice_id ?? '',
+      invoiceDate: parseMcleodDate(row.bill_date),
+      dueDate: '',
+      orderNum: row.order_id ?? '',
+      amount,
+      balance: amount,
+      current, over30, over60, over90, over120,
+    });
+  }
+
+  const customers = Array.from(custMap.values()).map(c => {
+    c.totals = {
+      balance: c.invoices.reduce((s, i) => s + i.balance, 0),
+      current: c.invoices.reduce((s, i) => s + i.current, 0),
+      over30: c.invoices.reduce((s, i) => s + i.over30, 0),
+      over60: c.invoices.reduce((s, i) => s + i.over60, 0),
+      over90: c.invoices.reduce((s, i) => s + i.over90, 0),
+      over120: c.invoices.reduce((s, i) => s + i.over120, 0),
+      invoiceCount: c.invoices.length,
+    };
+    return c;
+  }).filter(c => c.totals.balance > 0).sort((a, b) => b.totals.balance - a.totals.balance);
+
+  return { reportDate: today, customers };
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -475,6 +552,7 @@ export default function CollectionsReport({ tabId, uploaderName }: CollectionsRe
   const [lockToggling, setLockToggling] = useState(false);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [pulling, setPulling] = useState(false);
   const [search, setSearch] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -498,6 +576,37 @@ export default function CollectionsReport({ tabId, uploaderName }: CollectionsRe
   }, [tabId]);
 
   useEffect(() => { loadReport(); }, [loadReport]);
+
+  async function pullFromMcLeod() {
+    if (locked) return;
+    setError(null);
+    setPulling(true);
+    try {
+      const res = await fetch(`${MCLEOD_FN}?report=ar`, { headers: MCLEOD_HEADERS });
+      if (!res.ok) throw new Error(`McLeod pull failed: ${res.status}`);
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      const parsed = mapMcleodCollections(json.rows ?? []);
+      if (!parsed.customers.length) { setError('No collections data returned from McLeod.'); setPulling(false); return; }
+
+      await supabase.from('collections_reports').delete().eq('tab_id', tabId);
+      const { data: inserted } = await supabase.from('collections_reports').insert({
+        tab_id: tabId,
+        report_date: parsed.reportDate,
+        report_data: parsed.customers,
+        uploaded_by: uploaderName,
+        locked: false,
+      }).select('id').single();
+
+      setReport(parsed);
+      setReportId(inserted?.id ?? null);
+      setLocked(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to pull from McLeod.');
+    } finally {
+      setPulling(false);
+    }
+  }
 
   async function handleFile(file: File) {
     if (locked) return;
@@ -642,6 +751,20 @@ export default function CollectionsReport({ tabId, uploaderName }: CollectionsRe
               {lockToggling
                 ? <div className="w-3 h-3 border-2 rounded-full animate-spin" style={{ borderColor: '#7F1D1D', borderTopColor: '#EF4444' }} />
                 : <><Lock className="w-3 h-3" strokeWidth={2} />Locked — Unlock</>}
+            </button>
+          )}
+          {!locked && (
+            <button
+              onClick={pullFromMcLeod}
+              disabled={pulling || uploading}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
+              style={{ background: '#1A2A1A', color: '#4ADE80', border: '1px solid #166534' }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#1E3A1E'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = '#1A2A1A'; }}
+            >
+              {pulling
+                ? <><div className="w-3 h-3 border-2 rounded-full animate-spin" style={{ borderColor: '#166534', borderTopColor: '#4ADE80' }} />Pulling…</>
+                : <><RefreshCw className="w-3 h-3" />Pull from McLeod</>}
             </button>
           )}
           {!locked && (
