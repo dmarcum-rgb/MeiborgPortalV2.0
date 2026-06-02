@@ -79,9 +79,19 @@ Deno.serve(async (req: Request) => {
         fetchAll("/settlements/history/search", {
           "drs_settle_hist.company_id": COMPANY,
           "drs_settle_hist.payee_type": "C",
+          "drs_settle_hist.pay_date": ">=t-90",
         }),
       ]);
-      data = { open: openRows, history: histRows };
+      data = {
+        open: openRows,
+        history: histRows,
+        _debug: {
+          openSample: openRows[0] ?? null,
+          histSample: histRows[0] ?? null,
+          openCount: openRows.length,
+          histCount: histRows.length,
+        },
+      };
     } else if (report === "unbilled") {
       const rows = await fetchAll("/orders/search", {
         "orders.company_id": COMPANY,

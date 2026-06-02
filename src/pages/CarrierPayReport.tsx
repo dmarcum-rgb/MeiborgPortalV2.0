@@ -330,6 +330,11 @@ export default function CarrierPayReport({ tabId, uploaderName }: CarrierPayRepo
       const json = await res.json();
       if (json.error) throw new Error(json.error);
 
+      // Log raw sample rows so we can inspect field names
+      console.log('[CarrierPay] open count:', json._debug?.openCount, 'hist count:', json._debug?.histCount);
+      console.log('[CarrierPay] open sample:', json._debug?.openSample);
+      console.log('[CarrierPay] hist sample:', json._debug?.histSample);
+
       const parsed = buildReport(json.open ?? [], json.history ?? []);
       if (!parsed.payees.length) { pullStore.setError('carrier', 'No carrier pay data returned from McLeod.'); setError('No carrier pay data returned from McLeod.'); return; }
 
