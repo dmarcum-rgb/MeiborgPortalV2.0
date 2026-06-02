@@ -7,6 +7,7 @@ import DebtCalendar from './DebtCalendar';
 import CollectionsReport from './CollectionsReport';
 import UnbilledOrdersReport from './UnbilledOrdersReport';
 import AwardsPage from './AwardsPage';
+import CarrierPayReport from './CarrierPayReport';
 import {
   MessageSquare, Shield, Network, Home, FileText, Users, Star, Bell,
   BookOpen, Briefcase, Calendar, Heart, Image,
@@ -2355,6 +2356,7 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
   const isCalendarTab = activeTab?.label?.toLowerCase().includes('payment calendar') ?? false;
   const isCollectionsTab = activeTab?.label?.toLowerCase() === 'collections';
   const isUnbilledOrdersTab = activeTab?.label?.toLowerCase() === 'unbilled orders';
+  const isCarrierPayTab = activeTab?.label?.toLowerCase() === 'carrier pay';
   const isAwardsTab = activeTab?.label?.toLowerCase() === 'awards';
   // Any dept folder tab → full screen mode
   const isDeptTab = activeTabId != null && activeFolder != null;
@@ -2516,6 +2518,8 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
                 <CollectionsReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
               ) : isUnbilledOrdersTab && activeTabId ? (
                 <UnbilledOrdersReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
+              ) : isCarrierPayTab && activeTabId ? (
+                <CarrierPayReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
               ) : isAwardsTab && activeTabId ? (
                 <AwardsPage tabId={activeTabId} />
               ) : (
