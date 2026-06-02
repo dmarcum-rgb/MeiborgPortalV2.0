@@ -5,6 +5,7 @@ import {
   FileText, DollarSign, Clock, RefreshCw,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import * as pullStore from '../lib/mcleodPullStore';
 
 const MCLEOD_FN = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/mcleod-pull`;
 const MCLEOD_HEADERS = {
@@ -447,7 +448,7 @@ export default function UnbilledOrdersReport({ tabId, uploaderName }: UnbilledOr
   const [lockToggling, setLockToggling] = useState(false);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
-  const [pulling, setPulling] = useState(false);
+  const [pulling, setPulling] = useState(() => pullStore.getState('unbilled').pulling);
   const [search, setSearch] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -473,17 +474,19 @@ export default function UnbilledOrdersReport({ tabId, uploaderName }: UnbilledOr
 
   useEffect(() => { loadReport(); }, [loadReport]);
 
+  useEffect(() => pullStore.subscribe('unbilled', s => setPulling(s.pulling)), []);
+
   async function pullFromMcLeod() {
-    if (locked) return;
+    if (locked || pullStore.getState('unbilled').pulling) return;
     setError(null);
-    setPulling(true);
+    pullStore.setPulling('unbilled', true);
     try {
       const res = await fetch(`${MCLEOD_FN}?report=unbilled`, { headers: MCLEOD_HEADERS });
       if (!res.ok) throw new Error(`McLeod pull failed: ${res.status}`);
       const json = await res.json();
       if (json.error) throw new Error(json.error);
       const parsed = mapMcleodUnbilled(json.rows ?? []);
-      if (!parsed.orders.length) { setError('No unbilled orders returned from McLeod.'); setPulling(false); return; }
+      if (!parsed.orders.length) { pullStore.setError('unbilled', 'No unbilled orders returned from McLeod.'); setError('No unbilled orders returned from McLeod.'); return; }
 
       await supabase.from('unbilled_orders_reports').delete().eq('tab_id', tabId);
       const { data: inserted } = await supabase.from('unbilled_orders_reports').insert({
@@ -494,13 +497,14 @@ export default function UnbilledOrdersReport({ tabId, uploaderName }: UnbilledOr
         locked: false,
       }).select('id').single();
 
+      pullStore.setResult('unbilled', parsed);
       setReport(parsed);
       setReportId(inserted?.id ?? null);
       setLocked(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to pull from McLeod.');
-    } finally {
-      setPulling(false);
+      const msg = e instanceof Error ? e.message : 'Failed to pull from McLeod.';
+      pullStore.setError('unbilled', msg);
+      setError(msg);
     }
   }
 

@@ -4,6 +4,7 @@ import {
   Truck, DollarSign, Clock, CheckCircle, XCircle,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import * as pullStore from '../lib/mcleodPullStore';
 
 const MCLEOD_FN = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/mcleod-pull`;
 const MCLEOD_HEADERS = {
@@ -295,7 +296,7 @@ interface CarrierPayReportProps {
 export default function CarrierPayReport({ tabId, uploaderName }: CarrierPayReportProps) {
   const [report, setReport] = useState<CarrierPayReportData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [pulling, setPulling] = useState(false);
+  const [pulling, setPulling] = useState(() => pullStore.getState('carrier').pulling);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'open' | 'paid'>('open');
   const [error, setError] = useState<string | null>(null);
@@ -317,9 +318,12 @@ export default function CarrierPayReport({ tabId, uploaderName }: CarrierPayRepo
 
   useEffect(() => { loadReport(); }, [loadReport]);
 
+  useEffect(() => pullStore.subscribe('carrier', s => setPulling(s.pulling)), []);
+
   async function pullFromMcLeod() {
+    if (pullStore.getState('carrier').pulling) return;
     setError(null);
-    setPulling(true);
+    pullStore.setPulling('carrier', true);
     try {
       const res = await fetch(`${MCLEOD_FN}?report=carrier`, { headers: MCLEOD_HEADERS });
       if (!res.ok) throw new Error(`McLeod pull failed: ${res.status}`);
@@ -327,7 +331,7 @@ export default function CarrierPayReport({ tabId, uploaderName }: CarrierPayRepo
       if (json.error) throw new Error(json.error);
 
       const parsed = buildReport(json.open ?? [], json.history ?? []);
-      if (!parsed.payees.length) { setError('No carrier pay data returned from McLeod.'); setPulling(false); return; }
+      if (!parsed.payees.length) { pullStore.setError('carrier', 'No carrier pay data returned from McLeod.'); setError('No carrier pay data returned from McLeod.'); return; }
 
       await supabase.from('carrier_pay_reports').delete().eq('tab_id', tabId);
       await supabase.from('carrier_pay_reports').insert({
@@ -337,11 +341,12 @@ export default function CarrierPayReport({ tabId, uploaderName }: CarrierPayRepo
         pulled_by: uploaderName,
       });
 
+      pullStore.setResult('carrier', parsed);
       setReport(parsed);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to pull from McLeod.');
-    } finally {
-      setPulling(false);
+      const msg = e instanceof Error ? e.message : 'Failed to pull from McLeod.';
+      pullStore.setError('carrier', msg);
+      setError(msg);
     }
   }
 

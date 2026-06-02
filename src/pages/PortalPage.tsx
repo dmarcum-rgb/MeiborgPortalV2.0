@@ -2506,50 +2506,23 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
           <>
             {/* Full-screen tab content */}
             <div className="flex-1 overflow-hidden" style={{ background: '#0F0E0C' }}>
-              {/* Pull-capable report tabs stay mounted to preserve in-flight pulls when switching tabs */}
-              {(() => {
-                const arTab = tabs.find(t => t.label?.toLowerCase().includes('accounts receivable'));
-                const apTab = tabs.find(t => t.label?.toLowerCase().includes('accounts payable'));
-                const collTab = tabs.find(t => t.label?.toLowerCase() === 'collections');
-                const uboTab = tabs.find(t => t.label?.toLowerCase() === 'unbilled orders');
-                const cpTab = tabs.find(t => t.label?.toLowerCase() === 'carrier pay');
-                return (
-                  <>
-                    {arTab && (
-                      <div className="h-full" style={{ display: isARTab ? 'block' : 'none' }}>
-                        <ARReport tabId={arTab.id} uploaderName={member?.full_name ?? ''} />
-                      </div>
-                    )}
-                    {apTab && (
-                      <div className="h-full" style={{ display: isAPTab ? 'block' : 'none' }}>
-                        <APReport tabId={apTab.id} uploaderName={member?.full_name ?? ''} />
-                      </div>
-                    )}
-                    {collTab && (
-                      <div className="h-full" style={{ display: isCollectionsTab ? 'block' : 'none' }}>
-                        <CollectionsReport tabId={collTab.id} uploaderName={member?.full_name ?? ''} />
-                      </div>
-                    )}
-                    {uboTab && (
-                      <div className="h-full" style={{ display: isUnbilledOrdersTab ? 'block' : 'none' }}>
-                        <UnbilledOrdersReport tabId={uboTab.id} uploaderName={member?.full_name ?? ''} />
-                      </div>
-                    )}
-                    {cpTab && (
-                      <div className="h-full" style={{ display: isCarrierPayTab ? 'block' : 'none' }}>
-                        <CarrierPayReport tabId={cpTab.id} uploaderName={member?.full_name ?? ''} />
-                      </div>
-                    )}
-                  </>
-                );
-              })()}
-              {isDebtTab && activeTabId ? (
+              {isARTab && activeTabId ? (
+                <ARReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
+              ) : isAPTab && activeTabId ? (
+                <APReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
+              ) : isDebtTab && activeTabId ? (
                 <DebtReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
               ) : isCalendarTab && activeTabId ? (
                 <DebtCalendar tabId={activeTabId} />
+              ) : isCollectionsTab && activeTabId ? (
+                <CollectionsReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
+              ) : isUnbilledOrdersTab && activeTabId ? (
+                <UnbilledOrdersReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
+              ) : isCarrierPayTab && activeTabId ? (
+                <CarrierPayReport tabId={activeTabId} uploaderName={member?.full_name ?? ''} />
               ) : isAwardsTab && activeTabId ? (
                 <AwardsPage tabId={activeTabId} />
-              ) : !isARTab && !isAPTab && !isCollectionsTab && !isUnbilledOrdersTab && !isCarrierPayTab && !isDebtTab && !isCalendarTab && !isAwardsTab && activeTabId ? (
+              ) : (
                 <div className="flex flex-col items-center justify-center h-full gap-3">
                   <div className="w-14 h-14 rounded-2xl flex items-center justify-center" style={{ background: '#1A1917', border: '1px solid #262422' }}>
                     <TabIcon name={activeTab?.icon ?? 'FileText'} className="w-6 h-6" style={{ color: '#C8A96E' } as React.CSSProperties} />
@@ -2557,7 +2530,7 @@ function DeptPortalView({ member, onSignOut }: { member: LoggedInMember | null; 
                   <p className="text-sm font-medium" style={{ color: '#F5F3EE' }}>{activeTab?.label}</p>
                   <p className="text-xs" style={{ color: '#4A4844' }}>Coming soon</p>
                 </div>
-              ) : null}
+              )}
             </div>
 
             {/* Floating MeiGuy button */}

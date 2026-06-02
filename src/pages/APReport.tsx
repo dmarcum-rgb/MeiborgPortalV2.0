@@ -4,6 +4,7 @@ import {
   Lock, Unlock, Search, Building2, FileText, RefreshCw
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import * as pullStore from '../lib/mcleodPullStore';
 
 const MCLEOD_FN = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/mcleod-pull`;
 const MCLEOD_HEADERS = {
@@ -509,7 +510,7 @@ export default function APReport({ tabId, uploaderName }: APReportProps) {
   const [lockToggling, setLockToggling] = useState(false);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
-  const [pulling, setPulling] = useState(false);
+  const [pulling, setPulling] = useState(() => pullStore.getState('ap').pulling);
   const [search, setSearch] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -534,17 +535,19 @@ export default function APReport({ tabId, uploaderName }: APReportProps) {
 
   useEffect(() => { loadReport(); }, [loadReport]);
 
+  useEffect(() => pullStore.subscribe('ap', s => setPulling(s.pulling)), []);
+
   async function pullFromMcLeod() {
-    if (locked) return;
+    if (locked || pullStore.getState('ap').pulling) return;
     setError(null);
-    setPulling(true);
+    pullStore.setPulling('ap', true);
     try {
       const res = await fetch(`${MCLEOD_FN}?report=ap`, { headers: MCLEOD_HEADERS });
       if (!res.ok) throw new Error(`McLeod pull failed: ${res.status}`);
       const json = await res.json();
       if (json.error) throw new Error(json.error);
       const parsed = mapMcleodAP(json.rows ?? []);
-      if (!parsed.vendors.length) { setError('No AP data returned from McLeod.'); setPulling(false); return; }
+      if (!parsed.vendors.length) { pullStore.setError('ap', 'No AP data returned from McLeod.'); setError('No AP data returned from McLeod.'); return; }
 
       await supabase.from('ap_reports').delete().eq('tab_id', tabId);
       const { data: inserted } = await supabase.from('ap_reports').insert({
@@ -555,13 +558,14 @@ export default function APReport({ tabId, uploaderName }: APReportProps) {
         locked: false,
       }).select('id').single();
 
+      pullStore.setResult('ap', parsed);
       setReport(parsed);
       setReportId(inserted?.id ?? null);
       setLocked(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to pull from McLeod.');
-    } finally {
-      setPulling(false);
+      const msg = e instanceof Error ? e.message : 'Failed to pull from McLeod.';
+      pullStore.setError('ap', msg);
+      setError(msg);
     }
   }
 

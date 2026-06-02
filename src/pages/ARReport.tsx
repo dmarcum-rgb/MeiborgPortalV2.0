@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import { Upload, ChevronDown, ChevronRight, Phone, User, Clock, CreditCard, AlertTriangle, TrendingUp, X, Lock, Unlock, RefreshCw } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import * as pullStore from '../lib/mcleodPullStore';
 
 const MCLEOD_FN = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/mcleod-pull`;
 const MCLEOD_HEADERS = {
@@ -661,11 +662,16 @@ export default function ARReport({ tabId, uploaderName }: Props) {
   const [lockToggling, setLockToggling] = useState(false);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
-  const [pulling, setPulling] = useState(false);
+  const [pulling, setPulling] = useState(() => pullStore.getState('ar').pulling);
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // Subscribe to pull store so pulling state survives tab switches
+  useEffect(() => {
+    return pullStore.subscribe('ar', s => setPulling(s.pulling));
+  }, []);
 
   // Load persisted report on mount
   useEffect(() => {
@@ -687,16 +693,16 @@ export default function ARReport({ tabId, uploaderName }: Props) {
   }, [tabId]);
 
   async function pullFromMcLeod() {
-    if (locked) return;
+    if (locked || pullStore.getState('ar').pulling) return;
     setError(null);
-    setPulling(true);
+    pullStore.setPulling('ar', true);
     try {
       const res = await fetch(`${MCLEOD_FN}?report=ar`, { headers: MCLEOD_HEADERS });
       if (!res.ok) throw new Error(`McLeod pull failed: ${res.status}`);
       const json = await res.json();
       if (json.error) throw new Error(json.error);
       const parsed = mapMcleodAR(json.rows ?? []);
-      if (!parsed.customers.length) { setError('No AR data returned from McLeod.'); setPulling(false); return; }
+      if (!parsed.customers.length) { pullStore.setError('ar', 'No AR data returned from McLeod.'); setError('No AR data returned from McLeod.'); return; }
 
       await supabase.from('ar_reports').delete().eq('tab_id', tabId);
       await supabase.from('ar_reports').insert({
@@ -707,13 +713,14 @@ export default function ARReport({ tabId, uploaderName }: Props) {
         locked: false,
       });
       const { data: inserted } = await supabase.from('ar_reports').select('id').eq('tab_id', tabId).order('created_at', { ascending: false }).limit(1).maybeSingle();
+      pullStore.setResult('ar', parsed);
       setReport(parsed);
       setReportId(inserted?.id ?? null);
       setLocked(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to pull from McLeod.');
-    } finally {
-      setPulling(false);
+      const msg = e instanceof Error ? e.message : 'Failed to pull from McLeod.';
+      pullStore.setError('ar', msg);
+      setError(msg);
     }
   }
 

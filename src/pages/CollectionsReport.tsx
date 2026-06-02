@@ -5,6 +5,7 @@ import {
   DollarSign, X, RefreshCw,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import * as pullStore from '../lib/mcleodPullStore';
 
 const MCLEOD_FN = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/mcleod-pull`;
 const MCLEOD_HEADERS = {
@@ -552,7 +553,7 @@ export default function CollectionsReport({ tabId, uploaderName }: CollectionsRe
   const [lockToggling, setLockToggling] = useState(false);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
-  const [pulling, setPulling] = useState(false);
+  const [pulling, setPulling] = useState(() => pullStore.getState('collections').pulling);
   const [search, setSearch] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -577,17 +578,19 @@ export default function CollectionsReport({ tabId, uploaderName }: CollectionsRe
 
   useEffect(() => { loadReport(); }, [loadReport]);
 
+  useEffect(() => pullStore.subscribe('collections', s => setPulling(s.pulling)), []);
+
   async function pullFromMcLeod() {
-    if (locked) return;
+    if (locked || pullStore.getState('collections').pulling) return;
     setError(null);
-    setPulling(true);
+    pullStore.setPulling('collections', true);
     try {
       const res = await fetch(`${MCLEOD_FN}?report=ar`, { headers: MCLEOD_HEADERS });
       if (!res.ok) throw new Error(`McLeod pull failed: ${res.status}`);
       const json = await res.json();
       if (json.error) throw new Error(json.error);
       const parsed = mapMcleodCollections(json.rows ?? []);
-      if (!parsed.customers.length) { setError('No collections data returned from McLeod.'); setPulling(false); return; }
+      if (!parsed.customers.length) { pullStore.setError('collections', 'No collections data returned from McLeod.'); setError('No collections data returned from McLeod.'); return; }
 
       await supabase.from('collections_reports').delete().eq('tab_id', tabId);
       const { data: inserted } = await supabase.from('collections_reports').insert({
@@ -598,13 +601,14 @@ export default function CollectionsReport({ tabId, uploaderName }: CollectionsRe
         locked: false,
       }).select('id').single();
 
+      pullStore.setResult('collections', parsed);
       setReport(parsed);
       setReportId(inserted?.id ?? null);
       setLocked(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to pull from McLeod.');
-    } finally {
-      setPulling(false);
+      const msg = e instanceof Error ? e.message : 'Failed to pull from McLeod.';
+      pullStore.setError('collections', msg);
+      setError(msg);
     }
   }
 
